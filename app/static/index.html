@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TrafficStats</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e4e4e7;
+      --text-dim: #8b8d97;
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, .25);
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .controls {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+    }
+
+    .btn {
+      padding: .5rem 1.1rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text-dim);
+      font-size: .875rem;
+      cursor: pointer;
+      transition: all .15s ease;
+    }
+    .btn:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .btn.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+    }
+
+    .card .label {
+      font-size: .75rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-dim);
+      margin-bottom: .35rem;
+    }
+
+    .card .value {
+      font-size: 1.75rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .chart-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.25rem;
+      position: relative;
+    }
+
+    canvas { width: 100% !important; }
+
+    .status-bar {
+      margin-top: 1rem;
+      font-size: .75rem;
+      color: var(--text-dim);
+      text-align: right;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Traffic Stats</h1>
+      <div class="controls">
+        <button class="btn active" data-range="24h">Last 24 Hours</button>
+        <button class="btn" data-range="week">Last Week</button>
+      </div>
+    </header>
+
+    <div class="cards">
+      <div class="card">
+        <div class="label">Total vehicles</div>
+        <div class="value" id="total">--</div>
+      </div>
+      <div class="card">
+        <div class="label">Peak (5 min)</div>
+        <div class="value" id="peak">--</div>
+      </div>
+      <div class="card">
+        <div class="label">Time range</div>
+        <div class="value" id="range-label">24 h</div>
+      </div>
+    </div>
+
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+    </div>
+
+    <div class="status-bar">
+      Auto-refreshes every 60 s &middot; Last update: <span id="last-update">--</span>
+    </div>
+  </div>
+
+  <script>
+    // -----------------------------------------------------------------------
+    // State
+    // -----------------------------------------------------------------------
+    let currentRange = '24h';
+    let chart = null;
+
+    // -----------------------------------------------------------------------
+    // Chart setup
+    // -----------------------------------------------------------------------
+    function initChart() {
+      const ctx = document.getElementById('chart').getContext('2d');
+      chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [{
+            label: 'Vehicles per 5 min',
+            data: [],
+            borderColor: '#6366f1',
+            backgroundColor: 'rgba(99,102,241,0.10)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+            pointHoverRadius: 4,
+            borderWidth: 2,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1a1d27',
+              borderColor: '#2a2d3a',
+              borderWidth: 1,
+              titleColor: '#e4e4e7',
+              bodyColor: '#e4e4e7',
+              padding: 10,
+              displayColors: false,
+              callbacks: {
+                title: (items) => items[0].label,
+                label: (item) => `${item.formattedValue} vehicles`,
+              },
+            },
+          },
+          scales: {
+            x: {
+              type: 'time',
+              time: {
+                tooltipFormat: 'yyyy-MM-dd HH:mm',
+                displayFormats: {
+                  minute: 'HH:mm',
+                  hour: 'HH:mm',
+                  day: 'MMM d',
+                },
+              },
+              grid: { color: 'rgba(255,255,255,0.04)' },
+              ticks: { color: '#8b8d97', maxTicksLimit: 16 },
+            },
+            y: {
+              beginAtZero: true,
+              grid: { color: 'rgba(255,255,255,0.04)' },
+              ticks: { color: '#8b8d97', precision: 0 },
+            },
+          },
+        },
+      });
+
+      // Force a reasonable height
+      chart.canvas.parentNode.style.height = '380px';
+    }
+
+    // -----------------------------------------------------------------------
+    // Data fetching
+    // -----------------------------------------------------------------------
+    async function fetchData() {
+      try {
+        const resp = await fetch(`/api/stats?range=${currentRange}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const json = await resp.json();
+        updateUI(json);
+      } catch (err) {
+        console.error('Fetch error:', err);
+      }
+    }
+
+    function updateUI({ buckets, total }) {
+      // Cards
+      document.getElementById('total').textContent = total.toLocaleString();
+      const peak = buckets.reduce((mx, b) => Math.max(mx, b.count), 0);
+      document.getElementById('peak').textContent = peak.toLocaleString();
+      document.getElementById('range-label').textContent =
+        currentRange === '24h' ? '24 h' : '7 days';
+
+      // Chart
+      // Parse bucket time strings into Date objects.
+      // The bucket format is "YYYY-MM-DD HH:MM" in UTC.
+      const labels = buckets.map(b => new Date(b.time + ':00Z'));
+      const data = buckets.map(b => b.count);
+
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = data;
+
+      // Adjust time unit based on range
+      if (currentRange === 'week') {
+        chart.options.scales.x.time.unit = 'day';
+      } else {
+        chart.options.scales.x.time.unit = 'hour';
+      }
+
+      chart.update('none'); // skip animations for snappiness
+
+      document.getElementById('last-update').textContent =
+        new Date().toLocaleTimeString();
+    }
+
+    // -----------------------------------------------------------------------
+    // Controls
+    // -----------------------------------------------------------------------
+    document.querySelectorAll('.btn[data-range]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelector('.btn.active').classList.remove('active');
+        btn.classList.add('active');
+        currentRange = btn.dataset.range;
+        fetchData();
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Init
+    // -----------------------------------------------------------------------
+    initChart();
+    fetchData();
+    setInterval(fetchData, 60_000);
+  </script>
+</body>
+</html>

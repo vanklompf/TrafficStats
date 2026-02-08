@@ -1,0 +1,11 @@
+services:
+  trafficstats:
+    build: .
+    container_name: trafficstats
+    restart: unless-stopped
+    ports:
+      - "3896:8080"
+    volumes:
+      - ./data:/data
+    env_file:
+      - .env
