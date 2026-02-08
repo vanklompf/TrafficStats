@@ -57,10 +57,15 @@ def insert_event(camera: str = "", direction: str = ""):
 
 def get_stats(range_key: str) -> dict:
     """
-    Return event counts aggregated into 5-minute buckets.
+    Return event counts aggregated into 5-minute buckets, split by direction.
 
     range_key: '24h' or 'week'
-    Returns: {'buckets': [{'time': '...', 'count': N}, ...], 'total': N}
+    Returns: {
+        'buckets': [{'time': '...', 'count': N, 'left_to_right': N, 'right_to_left': N}, ...],
+        'total': N,
+        'total_left_to_right': N,
+        'total_right_to_left': N,
+    }
     """
     conn = _get_conn()
 
@@ -71,14 +76,16 @@ def get_stats(range_key: str) -> dict:
 
     since_str = since.strftime("%Y-%m-%d %H:%M:%S")
 
-    # Group into 5-minute buckets by truncating minutes to nearest 5
+    # Group into 5-minute buckets with per-direction counts
     rows = conn.execute(
         """
         SELECT
-            strftime('%%Y-%%m-%%d %%H:', timestamp)
-                || printf('%%02d', (CAST(strftime('%%M', timestamp) AS INTEGER) / 5) * 5)
+            strftime('%Y-%m-%d %H:', timestamp)
+                || printf('%02d', (CAST(strftime('%M', timestamp) AS INTEGER) / 5) * 5)
                 AS bucket,
-            COUNT(*) AS count
+            COUNT(*) AS count,
+            SUM(CASE WHEN direction = 'LeftToRight' THEN 1 ELSE 0 END) AS left_to_right,
+            SUM(CASE WHEN direction = 'RightToLeft' THEN 1 ELSE 0 END) AS right_to_left
         FROM events
         WHERE timestamp >= ?
         GROUP BY bucket
@@ -87,7 +94,22 @@ def get_stats(range_key: str) -> dict:
         (since_str,),
     ).fetchall()
 
-    buckets = [{"time": row["bucket"], "count": row["count"]} for row in rows]
+    buckets = [
+        {
+            "time": row["bucket"],
+            "count": row["count"],
+            "left_to_right": row["left_to_right"],
+            "right_to_left": row["right_to_left"],
+        }
+        for row in rows
+    ]
     total = sum(b["count"] for b in buckets)
+    total_ltr = sum(b["left_to_right"] for b in buckets)
+    total_rtl = sum(b["right_to_left"] for b in buckets)
 
-    return {"buckets": buckets, "total": total}
+    return {
+        "buckets": buckets,
+        "total": total,
+        "total_left_to_right": total_ltr,
+        "total_right_to_left": total_rtl,
+    }

@@ -136,12 +136,16 @@
         <div class="value" id="total">--</div>
       </div>
       <div class="card">
-        <div class="label">Peak (5 min)</div>
-        <div class="value" id="peak">--</div>
+        <div class="label" style="color:#22d3ee">Left to Right</div>
+        <div class="value" id="total-ltr">--</div>
       </div>
       <div class="card">
-        <div class="label">Time range</div>
-        <div class="value" id="range-label">24 h</div>
+        <div class="label" style="color:#f472b6">Right to Left</div>
+        <div class="value" id="total-rtl">--</div>
+      </div>
+      <div class="card">
+        <div class="label">Peak (5 min)</div>
+        <div class="value" id="peak">--</div>
       </div>
     </div>
 
@@ -170,24 +174,53 @@
         type: 'line',
         data: {
           labels: [],
-          datasets: [{
-            label: 'Vehicles per 5 min',
-            data: [],
-            borderColor: '#6366f1',
-            backgroundColor: 'rgba(99,102,241,0.10)',
-            fill: true,
-            tension: 0.3,
-            pointRadius: 0,
-            pointHoverRadius: 4,
-            borderWidth: 2,
-          }],
+          datasets: [
+            {
+              label: 'All vehicles',
+              data: [],
+              borderColor: '#6366f1',
+              backgroundColor: 'rgba(99,102,241,0.08)',
+              fill: true,
+              tension: 0.3,
+              pointRadius: 0,
+              pointHoverRadius: 4,
+              borderWidth: 2,
+            },
+            {
+              label: 'Left to Right',
+              data: [],
+              borderColor: '#22d3ee',
+              backgroundColor: 'rgba(34,211,238,0.06)',
+              fill: false,
+              tension: 0.3,
+              pointRadius: 0,
+              pointHoverRadius: 4,
+              borderWidth: 1.5,
+              borderDash: [4, 3],
+            },
+            {
+              label: 'Right to Left',
+              data: [],
+              borderColor: '#f472b6',
+              backgroundColor: 'rgba(244,114,182,0.06)',
+              fill: false,
+              tension: 0.3,
+              pointRadius: 0,
+              pointHoverRadius: 4,
+              borderWidth: 1.5,
+              borderDash: [4, 3],
+            },
+          ],
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
           plugins: {
-            legend: { display: false },
+            legend: {
+              display: true,
+              labels: { color: '#8b8d97', boxWidth: 14, padding: 16 },
+            },
             tooltip: {
               backgroundColor: '#1a1d27',
               borderColor: '#2a2d3a',
@@ -195,11 +228,7 @@
               titleColor: '#e4e4e7',
               bodyColor: '#e4e4e7',
               padding: 10,
-              displayColors: false,
-              callbacks: {
-                title: (items) => items[0].label,
-                label: (item) => `${item.formattedValue} vehicles`,
-              },
+              displayColors: true,
             },
           },
           scales: {
@@ -243,22 +272,23 @@
       }
     }
 
-    function updateUI({ buckets, total }) {
+    function updateUI({ buckets, total, total_left_to_right, total_right_to_left }) {
       // Cards
       document.getElementById('total').textContent = total.toLocaleString();
+      document.getElementById('total-ltr').textContent = total_left_to_right.toLocaleString();
+      document.getElementById('total-rtl').textContent = total_right_to_left.toLocaleString();
       const peak = buckets.reduce((mx, b) => Math.max(mx, b.count), 0);
       document.getElementById('peak').textContent = peak.toLocaleString();
-      document.getElementById('range-label').textContent =
-        currentRange === '24h' ? '24 h' : '7 days';
 
       // Chart
       // Parse bucket time strings into Date objects.
       // The bucket format is "YYYY-MM-DD HH:MM" in UTC.
       const labels = buckets.map(b => new Date(b.time + ':00Z'));
-      const data = buckets.map(b => b.count);
 
       chart.data.labels = labels;
-      chart.data.datasets[0].data = data;
+      chart.data.datasets[0].data = buckets.map(b => b.count);
+      chart.data.datasets[1].data = buckets.map(b => b.left_to_right);
+      chart.data.datasets[2].data = buckets.map(b => b.right_to_left);
 
       // Adjust time unit based on range
       if (currentRange === 'week') {
