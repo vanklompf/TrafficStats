@@ -113,13 +113,13 @@ class DahuaListener:
         We only care about action=Start events.
         """
         buffer = ""
-        for chunk in resp.iter_content(chunk_size=1024, decode_unicode=True):
+        for chunk in resp.iter_content(chunk_size=1024):
             if self._stop_event.is_set():
                 break
             if chunk is None:
                 continue
 
-            buffer += chunk
+            buffer += chunk.decode("utf-8", errors="ignore") if isinstance(chunk, bytes) else chunk
             # Process complete lines
             while "\r\n" in buffer:
                 line, buffer = buffer.split("\r\n", 1)
