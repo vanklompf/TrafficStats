@@ -76,10 +76,16 @@
     }
 
     .cards {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .cards-row {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: 1rem;
-      margin-bottom: 1.5rem;
     }
 
     .card {
@@ -139,32 +145,36 @@
     </header>
 
     <div class="cards">
-      <div class="card">
-        <div class="label">Total vehicles</div>
-        <div class="value" id="total">--</div>
+      <div class="cards-row">
+        <div class="card">
+          <div class="label">Total vehicles</div>
+          <div class="value" id="total">--</div>
+        </div>
+        <div class="card">
+          <div class="label" style="color:#22d3ee">Left to Right</div>
+          <div class="value" id="total-ltr">--</div>
+        </div>
+        <div class="card">
+          <div class="label" style="color:#f472b6">Right to Left</div>
+          <div class="value" id="total-rtl">--</div>
+        </div>
       </div>
-      <div class="card">
-        <div class="label" style="color:#22d3ee">Left to Right</div>
-        <div class="value" id="total-ltr">--</div>
-      </div>
-      <div class="card">
-        <div class="label" style="color:#f472b6">Right to Left</div>
-        <div class="value" id="total-rtl">--</div>
-      </div>
-      <div class="card">
-        <div class="label">Peak (5 min)</div>
-        <div class="value" id="peak">--</div>
-        <div class="peak-time" id="peak-time"></div>
-      </div>
-      <div class="card">
-        <div class="label">Peak (1 min)</div>
-        <div class="value" id="peak-1min">--</div>
-        <div class="peak-time" id="peak-1min-time"></div>
-      </div>
-      <div class="card">
-        <div class="label">Peak (1 hour)</div>
-        <div class="value" id="peak-1h">--</div>
-        <div class="peak-time" id="peak-1h-time"></div>
+      <div class="cards-row">
+        <div class="card">
+          <div class="label">Peak (1 hour)</div>
+          <div class="value" id="peak-1h">--</div>
+          <div class="peak-time" id="peak-1h-time"></div>
+        </div>
+        <div class="card">
+          <div class="label">Peak (5 min)</div>
+          <div class="value" id="peak">--</div>
+          <div class="peak-time" id="peak-time"></div>
+        </div>
+        <div class="card">
+          <div class="label">Peak (1 min)</div>
+          <div class="value" id="peak-1min">--</div>
+          <div class="peak-time" id="peak-1min-time"></div>
+        </div>
       </div>
     </div>
 
@@ -235,7 +245,8 @@
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
-          annotation: {
+          plugins: {
+            annotation: {
               annotations: {},
             },
             legend: {
@@ -318,9 +329,12 @@
       document.getElementById('peak-1h-time').textContent = formatPeakTime(peak_1h_time);
 
       // Chart
-      // Parse bucket time strings into Date objects.
-      // The bucket format is "YYYY-MM-DD HH:MM" in UTC.
-      const labels = buckets.map(b => new Date(b.time + ':00Z'));
+      // Parse bucket time strings into Date objects (UTC).
+      // API bucket format is "YYYY-MM-DD HH:MM" or "YYYY-MM-DD HH" for 1h; use ISO for reliable parsing.
+      const labels = buckets.map(b => {
+        const iso = b.time.replace(' ', 'T') + (b.time.length <= 13 ? ':00:00' : ':00') + 'Z';
+        return new Date(iso);
+      });
 
       chart.data.labels = labels;
       chart.data.datasets[0].data = buckets.map(b => b.count);

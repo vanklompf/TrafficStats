@@ -1,0 +1,12 @@
+# Standalone Compose file for testing (no port/name clash with default)
+services:
+  trafficstats:
+    build: .
+    container_name: trafficstats-test
+    restart: unless-stopped
+    ports:
+      - "3897:8080"
+    volumes:
+      - ./data-test:/data
+    env_file:
+      - .env
