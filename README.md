@@ -22,11 +22,9 @@ Edit `.env`:
 | `DAHUA_USER` | Camera username | `admin` |
 | `DAHUA_PASS` | Camera password | `admin` |
 | `DAHUA_EVENTS` | Event codes to listen for | `CrossLineDetection` |
-| `LATITUDE` | Location latitude (e.g. `60.17`) | — |
-| `LONGITUDE` | Location longitude (e.g. `24.94`) | — |
-| `TIMEZONE` | Timezone name (e.g. `Europe/Helsinki`) | — |
+| `CITY` | City name for location (e.g. `Helsinki`, `London, UK`). Lat/lon and timezone are looked up automatically. | — |
 
-When **LATITUDE**, **LONGITUDE**, and **TIMEZONE** are all set, events are only recorded between sunrise and sunset at that location. The chart shows shaded bands for periods when no collection is done (night).
+When **CITY** is set, events are only recorded between sunrise and sunset at that location. The chart shows shaded bands for periods when no collection is done (night).
 
 ## Dahua camera setup
 

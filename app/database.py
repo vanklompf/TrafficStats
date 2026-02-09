@@ -48,7 +48,7 @@ def init_db():
 def insert_event(camera: str = "", direction: str = ""):
     """Insert a single car-passing event with the current UTC timestamp.
     Only inserts when the current time is between sunrise and sunset at the
-    configured location (LATITUDE, LONGITUDE, TIMEZONE). If not set, records 24/7.
+    configured location (CITY). If not set, records 24/7.
     """
     now_utc = datetime.now(timezone.utc)
     if not is_daytime(now_utc):

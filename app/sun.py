@@ -1,8 +1,8 @@
 """
 Sunrise/sunset for collection window and chart no-collection bands.
 
-Uses LATITUDE, LONGITUDE, TIMEZONE env vars. If unset, collection runs 24/7
-and no bands are shown.
+Uses CITY env var. If unset, collection runs 24/7 and no bands are shown.
+Latitude, longitude and timezone are looked up from the city name.
 """
 
 import logging
@@ -12,35 +12,48 @@ from zoneinfo import ZoneInfo
 
 from astral import LocationInfo
 from astral.sun import sun
+from geopy.geocoders import Nominatim
+from timezonefinder import TimezoneFinder
 
 logger = logging.getLogger(__name__)
 
 _location: LocationInfo | None = None
+_location_failed: bool = False
 
 
 def _get_location() -> LocationInfo | None:
-    """Lazy-init location from env. Returns None if not configured."""
-    global _location
+    """Lazy-init location from CITY env. Returns None if not configured or lookup fails."""
+    global _location, _location_failed
     if _location is not None:
         return _location
-    lat_s = os.environ.get("LATITUDE", "").strip()
-    lon_s = os.environ.get("LONGITUDE", "").strip()
-    tz_name = os.environ.get("TIMEZONE", "").strip()
-    if not lat_s or not lon_s or not tz_name:
+    if _location_failed:
         return None
+
+    city = os.environ.get("CITY", "").strip()
+    if not city:
+        return None
+
     try:
-        lat = float(lat_s)
-        lon = float(lon_s)
-    except ValueError:
-        logger.warning("Invalid LATITUDE or LONGITUDE")
+        geolocator = Nominatim(user_agent="TrafficStats")
+        result = geolocator.geocode(city)
+        if result is None:
+            logger.warning("CITY not found: %s", city)
+            _location_failed = True
+            return None
+        lat, lon = result.latitude, result.longitude
+        tf = TimezoneFinder()
+        tz_name = tf.timezone_at(lng=lon, lat=lat)
+        if not tz_name:
+            logger.warning("No timezone for city: %s (lat=%.4f, lon=%.4f)", city, lat, lon)
+            _location_failed = True
+            return None
+        _location = LocationInfo(city, "", tz_name, lat, lon)
+        logger.info("Location from CITY=%s: lat=%.4f lon=%.4f tz=%s", city, lat, lon, tz_name)
+        return _location
+    except Exception as e:
+        logger.warning("CITY lookup failed for %s: %s", city, e)
+        _location_failed = True
         return None
-    try:
-        ZoneInfo(tz_name)
-    except Exception:
-        logger.warning("Invalid TIMEZONE: %s", tz_name)
-        return None
-    _location = LocationInfo("", "", tz_name, lat, lon)
-    return _location
 
 
 def is_daytime(utc_dt: datetime) -> bool:
