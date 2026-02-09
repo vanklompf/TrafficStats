@@ -6,6 +6,7 @@
   <title>TrafficStats</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -102,6 +103,13 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .card .peak-time {
+      font-size: .7rem;
+      color: var(--text-dim);
+      margin-top: .25rem;
+      font-variant-numeric: tabular-nums;
+    }
+
     .chart-wrap {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -146,6 +154,17 @@
       <div class="card">
         <div class="label">Peak (5 min)</div>
         <div class="value" id="peak">--</div>
+        <div class="peak-time" id="peak-time"></div>
+      </div>
+      <div class="card">
+        <div class="label">Peak (1 min)</div>
+        <div class="value" id="peak-1min">--</div>
+        <div class="peak-time" id="peak-1min-time"></div>
+      </div>
+      <div class="card">
+        <div class="label">Peak (1 hour)</div>
+        <div class="value" id="peak-1h">--</div>
+        <div class="peak-time" id="peak-1h-time"></div>
       </div>
     </div>
 
@@ -216,7 +235,9 @@
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
-          plugins: {
+          annotation: {
+              annotations: {},
+            },
             legend: {
               display: true,
               labels: { color: '#8b8d97', boxWidth: 14, padding: 16 },
@@ -272,13 +293,29 @@
       }
     }
 
-    function updateUI({ buckets, total, total_left_to_right, total_right_to_left }) {
+    function formatPeakTime(timeStr) {
+      if (!timeStr) return '';
+      // API: "YYYY-MM-DD HH:MM" or "YYYY-MM-DD HH" (UTC)
+      const isHour = /^\d{4}-\d{2}-\d{2} \d{2}$/.test(timeStr);
+      const iso = timeStr.replace(' ', 'T') + (isHour ? ':00:00' : ':00') + 'Z';
+      const date = new Date(iso);
+      return currentRange === 'week'
+        ? date.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+        : date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    }
+
+    function updateUI({ buckets, total, total_left_to_right, total_right_to_left, peak_1min, peak_1min_time, peak_5min_time, peak_1h, peak_1h_time, no_collection_ranges = [] }) {
       // Cards
       document.getElementById('total').textContent = total.toLocaleString();
       document.getElementById('total-ltr').textContent = total_left_to_right.toLocaleString();
       document.getElementById('total-rtl').textContent = total_right_to_left.toLocaleString();
       const peak = buckets.reduce((mx, b) => Math.max(mx, b.count), 0);
       document.getElementById('peak').textContent = peak.toLocaleString();
+      document.getElementById('peak-time').textContent = formatPeakTime(peak_5min_time);
+      document.getElementById('peak-1min').textContent = (peak_1min ?? 0).toLocaleString();
+      document.getElementById('peak-1min-time').textContent = formatPeakTime(peak_1min_time);
+      document.getElementById('peak-1h').textContent = (peak_1h ?? 0).toLocaleString();
+      document.getElementById('peak-1h-time').textContent = formatPeakTime(peak_1h_time);
 
       // Chart
       // Parse bucket time strings into Date objects.
@@ -289,6 +326,22 @@
       chart.data.datasets[0].data = buckets.map(b => b.count);
       chart.data.datasets[1].data = buckets.map(b => b.left_to_right);
       chart.data.datasets[2].data = buckets.map(b => b.right_to_left);
+
+      // No-collection bands (sunset–sunrise): shade periods when data is not collected
+      const annotations = {};
+      no_collection_ranges.forEach((r, i) => {
+        const xMin = new Date(r.start.replace(' ', 'T') + ':00Z').getTime();
+        const xMax = new Date(r.end.replace(' ', 'T') + ':00Z').getTime();
+        annotations['nocoll_' + i] = {
+          type: 'box',
+          xMin,
+          xMax,
+          backgroundColor: 'rgba(80, 80, 100, 0.2)',
+          borderWidth: 0,
+          display: true,
+        };
+      });
+      chart.options.plugins.annotation.annotations = annotations;
 
       // Adjust time unit based on range
       if (currentRange === 'week') {

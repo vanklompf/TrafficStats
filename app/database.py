@@ -4,6 +4,8 @@ import os
 import logging
 from datetime import datetime, timedelta, timezone
 
+from app.sun import get_no_collection_ranges, is_daytime
+
 logger = logging.getLogger(__name__)
 
 DB_PATH = os.environ.get("DB_PATH", "/data/traffic.db")
@@ -44,9 +46,16 @@ def init_db():
 
 
 def insert_event(camera: str = "", direction: str = ""):
-    """Insert a single car-passing event with the current UTC timestamp."""
+    """Insert a single car-passing event with the current UTC timestamp.
+    Only inserts when the current time is between sunrise and sunset at the
+    configured location (LATITUDE, LONGITUDE, TIMEZONE). If not set, records 24/7.
+    """
+    now_utc = datetime.now(timezone.utc)
+    if not is_daytime(now_utc):
+        logger.debug("Skipping event outside collection window (sunrise–sunset)")
+        return
     conn = _get_conn()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    now = now_utc.strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
         "INSERT INTO events (timestamp, camera, direction) VALUES (?, ?, ?)",
         (now, camera, direction),
@@ -65,6 +74,12 @@ def get_stats(range_key: str) -> dict:
         'total': N,
         'total_left_to_right': N,
         'total_right_to_left': N,
+        'peak_1min': N,
+        'peak_1min_time': str or None,
+        'peak_5min_time': str or None,
+        'peak_1h': N,
+        'peak_1h_time': str or None,
+        'no_collection_ranges': [{'start': str, 'end': str}, ...],
     }
     """
     conn = _get_conn()
@@ -107,9 +122,53 @@ def get_stats(range_key: str) -> dict:
     total_ltr = sum(b["left_to_right"] for b in buckets)
     total_rtl = sum(b["right_to_left"] for b in buckets)
 
+    # 1-minute peak: max count and time in any single minute in the same range
+    row_1min = conn.execute(
+        """
+        SELECT strftime('%Y-%m-%d %H:%M', timestamp) AS bucket, COUNT(*) AS cnt
+        FROM events
+        WHERE timestamp >= ?
+        GROUP BY bucket
+        ORDER BY cnt DESC
+        LIMIT 1
+        """,
+        (since_str,),
+    ).fetchone()
+    peak_1min = row_1min["cnt"] if row_1min else 0
+    peak_1min_time = row_1min["bucket"] if row_1min else None
+
+    # 1-hour peak: max count and time in any single hour in the same range
+    row_1h = conn.execute(
+        """
+        SELECT strftime('%Y-%m-%d %H', timestamp) AS bucket, COUNT(*) AS cnt
+        FROM events
+        WHERE timestamp >= ?
+        GROUP BY bucket
+        ORDER BY cnt DESC
+        LIMIT 1
+        """,
+        (since_str,),
+    ).fetchone()
+    peak_1h = row_1h["cnt"] if row_1h else 0
+    peak_1h_time = row_1h["bucket"] if row_1h else None
+
+    # 5-minute peak time: bucket with max count (from existing buckets)
+    peak_5min_bucket = max(buckets, key=lambda b: b["count"]) if buckets else None
+    peak_5min_time = peak_5min_bucket["time"] if peak_5min_bucket else None
+
+    # No-collection bands (sunset to sunrise) for the chart when location is set
+    now_utc = datetime.now(timezone.utc)
+    no_collection_ranges = get_no_collection_ranges(since, now_utc)
+
     return {
         "buckets": buckets,
         "total": total,
         "total_left_to_right": total_ltr,
         "total_right_to_left": total_rtl,
+        "peak_1min": peak_1min,
+        "peak_1min_time": peak_1min_time,
+        "peak_5min_time": peak_5min_time,
+        "peak_1h": peak_1h,
+        "peak_1h_time": peak_1h_time,
+        "no_collection_ranges": no_collection_ranges,
     }
