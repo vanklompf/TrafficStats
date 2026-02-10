@@ -315,13 +315,12 @@
         : date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
     }
 
-    function updateUI({ buckets, total, total_left_to_right, total_right_to_left, peak_1min, peak_1min_time, peak_5min_time, peak_1h, peak_1h_time, no_collection_ranges = [] }) {
+    function updateUI({ buckets, total, total_left_to_right, total_right_to_left, peak_1min, peak_1min_time, peak_5min, peak_5min_time, peak_1h, peak_1h_time, no_collection_ranges = [] }) {
       // Cards
       document.getElementById('total').textContent = total.toLocaleString();
       document.getElementById('total-ltr').textContent = total_left_to_right.toLocaleString();
       document.getElementById('total-rtl').textContent = total_right_to_left.toLocaleString();
-      const peak = buckets.reduce((mx, b) => Math.max(mx, b.count), 0);
-      document.getElementById('peak').textContent = peak.toLocaleString();
+      document.getElementById('peak').textContent = (peak_5min ?? 0).toLocaleString();
       document.getElementById('peak-time').textContent = formatPeakTime(peak_5min_time);
       document.getElementById('peak-1min').textContent = (peak_1min ?? 0).toLocaleString();
       document.getElementById('peak-1min-time').textContent = formatPeakTime(peak_1min_time);

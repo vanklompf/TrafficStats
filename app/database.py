@@ -122,39 +122,66 @@ def get_stats(range_key: str) -> dict:
     total_ltr = sum(b["left_to_right"] for b in buckets)
     total_rtl = sum(b["right_to_left"] for b in buckets)
 
-    # 1-minute peak: max count and time in any single minute in the same range
-    row_1min = conn.execute(
+    # -- Per-minute counts for sliding-window peaks ----------------------------
+    minute_rows = conn.execute(
         """
-        SELECT strftime('%Y-%m-%d %H:%M', timestamp) AS bucket, COUNT(*) AS cnt
+        SELECT strftime('%Y-%m-%d %H:%M', timestamp) AS minute,
+               COUNT(*) AS cnt
         FROM events
         WHERE timestamp >= ?
-        GROUP BY bucket
-        ORDER BY cnt DESC
-        LIMIT 1
+        GROUP BY minute
+        ORDER BY minute
         """,
         (since_str,),
-    ).fetchone()
-    peak_1min = row_1min["cnt"] if row_1min else 0
-    peak_1min_time = row_1min["bucket"] if row_1min else None
+    ).fetchall()
 
-    # 1-hour peak: max count and time in any single hour in the same range
-    row_1h = conn.execute(
-        """
-        SELECT strftime('%Y-%m-%d %H', timestamp) AS bucket, COUNT(*) AS cnt
-        FROM events
-        WHERE timestamp >= ?
-        GROUP BY bucket
-        ORDER BY cnt DESC
-        LIMIT 1
-        """,
-        (since_str,),
-    ).fetchone()
-    peak_1h = row_1h["cnt"] if row_1h else 0
-    peak_1h_time = row_1h["bucket"] if row_1h else None
+    # 1-minute peak (unchanged logic, just reuse the query)
+    if minute_rows:
+        best_1min = max(minute_rows, key=lambda r: r["cnt"])
+        peak_1min = best_1min["cnt"]
+        peak_1min_time = best_1min["minute"]
+    else:
+        peak_1min = 0
+        peak_1min_time = None
 
-    # 5-minute peak time: bucket with max count (from existing buckets)
-    peak_5min_bucket = max(buckets, key=lambda b: b["count"]) if buckets else None
-    peak_5min_time = peak_5min_bucket["time"] if peak_5min_bucket else None
+    # Build a continuous minute series for sliding-window computation
+    peak_5min = 0
+    peak_5min_time = None
+    peak_1h = 0
+    peak_1h_time = None
+
+    if minute_rows:
+        minute_counts = {r["minute"]: r["cnt"] for r in minute_rows}
+        first = datetime.strptime(minute_rows[0]["minute"], "%Y-%m-%d %H:%M")
+        last = datetime.strptime(minute_rows[-1]["minute"], "%Y-%m-%d %H:%M")
+
+        # Generate continuous list of (minute_key, count) from first to last
+        n_minutes = int((last - first).total_seconds() // 60) + 1
+        minutes = []
+        counts = []
+        for i in range(n_minutes):
+            key = (first + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M")
+            minutes.append(key)
+            counts.append(minute_counts.get(key, 0))
+
+        # Sliding-window helper
+        def _sliding_peak(window_size):
+            if not counts:
+                return 0, None
+            if len(counts) <= window_size:
+                return sum(counts), minutes[0]
+            window_sum = sum(counts[:window_size])
+            best_sum = window_sum
+            best_idx = 0
+            for i in range(1, len(counts) - window_size + 1):
+                window_sum += counts[i + window_size - 1] - counts[i - 1]
+                if window_sum > best_sum:
+                    best_sum = window_sum
+                    best_idx = i
+            return best_sum, minutes[best_idx]
+
+        peak_5min, peak_5min_time = _sliding_peak(5)
+        peak_1h, peak_1h_time = _sliding_peak(60)
 
     # No-collection bands (sunset to sunrise) for the chart when location is set
     now_utc = datetime.now(timezone.utc)
@@ -167,6 +194,7 @@ def get_stats(range_key: str) -> dict:
         "total_right_to_left": total_rtl,
         "peak_1min": peak_1min,
         "peak_1min_time": peak_1min_time,
+        "peak_5min": peak_5min,
         "peak_5min_time": peak_5min_time,
         "peak_1h": peak_1h,
         "peak_1h_time": peak_1h_time,
