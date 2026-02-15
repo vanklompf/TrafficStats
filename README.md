@@ -21,7 +21,8 @@ Edit `.env`:
 | `DAHUA_PORT` | Camera HTTP port | `80` |
 | `DAHUA_USER` | Camera username | `admin` |
 | `DAHUA_PASS` | Camera password | `admin` |
-| `DAHUA_EVENTS` | Event codes to listen for | `CrossLineDetection` |
+| `DAHUA_EVENTS` | Event codes to listen for | `All` |
+| `DAHUA_IVS_NAMES` | Comma-separated IVS rule names to accept (empty = accept all) | `CarDetection` |
 | `CITY` | City name for location (e.g. `Helsinki`, `London, UK`). Lat/lon and timezone are looked up automatically. | — |
 
 When **CITY** is set, events are only recorded between sunrise and sunset at that location. The chart shows shaded bands for periods when no collection is done (night).

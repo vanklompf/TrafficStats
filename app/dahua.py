@@ -39,6 +39,7 @@ class DahuaListener:
         password: str = "admin",
         events: str = "CrossLineDetection",
         protocol: str = "http",
+        ivs_names: str = "",
     ):
         self.host = host
         self.port = port
@@ -46,6 +47,9 @@ class DahuaListener:
         self.password = password
         self.events = events
         self.protocol = protocol
+        self.ivs_names: set[str] = {
+            n.strip() for n in ivs_names.split(",") if n.strip()
+        }
         self.url = EVENT_URL_TEMPLATE.format(
             protocol=protocol,
             host=host,
@@ -145,16 +149,25 @@ class DahuaListener:
             return
 
         direction = ""
+        ivs_name = ""
         if "data" in alarm:
             try:
                 data = json.loads(alarm["data"])
                 direction = data.get("Direction", "")
+                ivs_name = data.get("Name", "")
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        if self.ivs_names and ivs_name not in self.ivs_names:
+            logger.debug(
+                "Ignoring event with Name=%r (allowed: %s)", ivs_name, self.ivs_names
+            )
+            return
+
         camera_name = f"{self.host}"
         logger.info(
-            "Event: code=%s direction=%s camera=%s", code, direction, camera_name
+            "Event: code=%s name=%s direction=%s camera=%s",
+            code, ivs_name, direction, camera_name,
         )
         insert_event(camera=camera_name, direction=direction)
 
@@ -171,6 +184,7 @@ def create_listener_from_env() -> DahuaListener:
         port=int(os.environ.get("DAHUA_PORT", "80")),
         user=os.environ.get("DAHUA_USER", "admin"),
         password=os.environ.get("DAHUA_PASS", "admin"),
-        events=os.environ.get("DAHUA_EVENTS", "CrossLineDetection"),
+        events=os.environ.get("DAHUA_EVENTS", "All"),
         protocol=os.environ.get("DAHUA_PROTOCOL", "http"),
+        ivs_names=os.environ.get("DAHUA_IVS_NAMES", "CarDetection"),
     )
