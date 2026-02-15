@@ -16,7 +16,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MEDIA_PATH = os.environ.get("INTRUSION_MEDIA_PATH", "/media/kamera_front")
+MEDIA_PATH = os.environ.get("INTRUSION_MEDIA_PATH", "/media")
 VIDEO_CACHE_DIR = os.environ.get("VIDEO_CACHE_DIR", "/data/video_cache")
 VIDEO_CACHE_MAX_BYTES = (
     float(os.environ.get("VIDEO_CACHE_MAX_GB", "20")) * 1024 * 1024 * 1024
