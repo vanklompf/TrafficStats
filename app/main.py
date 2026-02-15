@@ -1,19 +1,29 @@
 """
 TrafficStats -- FastAPI application.
 
-Serves the dashboard and provides an API for traffic event statistics.
+Serves the dashboard and provides an API for traffic event statistics
+and intrusion event browsing with snapshot/video media.
 On startup, initialises the database and launches the Dahua event listener.
 """
 
 import logging
+import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.database import init_db, get_stats
+from app.database import init_db, get_stats, get_intrusion_events, get_intrusion_dates
 from app.dahua import DahuaListener, create_listener_from_env
+from app.intrusions import (
+    MEDIA_PATH,
+    match_media_for_events,
+    convert_dav_to_mp4,
+    get_cached_video_path,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -85,3 +95,89 @@ async def health():
         "status": "ok",
         "camera_listener": "running" if camera_connected else "stopped",
     }
+
+
+# ---------------------------------------------------------------------------
+# Intrusion routes
+# ---------------------------------------------------------------------------
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_SAFE_FILENAME_RE = re.compile(r"^[\w\.\-\[\]@]+$")
+
+
+def _validate_date(date_str: str) -> str:
+    if not _DATE_RE.match(date_str):
+        raise HTTPException(status_code=400, detail="Invalid date format")
+    return date_str
+
+
+def _validate_filename(filename: str) -> str:
+    if not _SAFE_FILENAME_RE.match(filename):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return filename
+
+
+@app.get("/api/intrusions/dates")
+async def api_intrusion_dates():
+    """Return list of dates that have intrusion events."""
+    return JSONResponse(content={"dates": get_intrusion_dates()})
+
+
+@app.get("/api/intrusions")
+async def api_intrusions(date: str = Query(default="")):
+    """
+    Return intrusion events for a given date with matched media.
+
+    If no date given, defaults to today (UTC).
+    """
+    if not date:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    date = _validate_date(date)
+    events = get_intrusion_events(date)
+    enriched = match_media_for_events(events, date)
+
+    # Build URLs for each event's media
+    for ev in enriched:
+        if ev["snapshot"]:
+            ev["snapshot_url"] = f"/media/snapshot/{date}/{ev['snapshot']}"
+        else:
+            ev["snapshot_url"] = None
+        if ev["video"]:
+            ev["video_url"] = f"/media/video/{date}/{ev['video']}"
+        else:
+            ev["video_url"] = None
+
+    return JSONResponse(content={"date": date, "events": enriched})
+
+
+@app.get("/media/snapshot/{date_str}/{filename}")
+async def media_snapshot(date_str: str, filename: str):
+    """Serve a JPG snapshot from the media directory."""
+    date_str = _validate_date(date_str)
+    filename = _validate_filename(filename)
+    path = Path(MEDIA_PATH) / date_str / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return FileResponse(str(path), media_type="image/jpeg")
+
+
+@app.get("/media/video/{date_str}/{filename}")
+async def media_video(date_str: str, filename: str):
+    """
+    Serve a DAV recording as a browser-friendly MP4.
+
+    Converts on first request and caches the result.
+    """
+    date_str = _validate_date(date_str)
+    filename = _validate_filename(filename)
+
+    # Check cache first
+    cached = get_cached_video_path(date_str, filename)
+    if cached is not None:
+        return FileResponse(str(cached), media_type="video/mp4")
+
+    # Convert DAV -> MP4
+    mp4_path = convert_dav_to_mp4(date_str, filename)
+    if mp4_path is None:
+        raise HTTPException(status_code=404, detail="Video not found or conversion failed")
+    return FileResponse(str(mp4_path), media_type="video/mp4")

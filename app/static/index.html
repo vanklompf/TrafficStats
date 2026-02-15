@@ -19,6 +19,7 @@
       --text-dim: #8b8d97;
       --accent: #6366f1;
       --accent-glow: rgba(99, 102, 241, .25);
+      --danger: #ef4444;
     }
 
     body {
@@ -76,6 +77,32 @@
       box-shadow: 0 0 12px var(--accent-glow);
     }
 
+    /* --- Tab navigation --- */
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .tab-btn {
+      padding: .75rem 1.5rem;
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-dim);
+      font-size: .95rem;
+      cursor: pointer;
+      transition: all .15s ease;
+    }
+    .tab-btn:hover { color: var(--text); }
+    .tab-btn.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* --- Traffic tab (existing) --- */
     .cards {
       display: flex;
       flex-direction: column;
@@ -133,58 +160,269 @@
       color: var(--text-dim);
       text-align: right;
     }
+
+    /* --- Intrusions tab --- */
+    .intrusions-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .intrusions-toolbar label {
+      font-size: .875rem;
+      color: var(--text-dim);
+    }
+
+    .intrusions-toolbar input[type="date"] {
+      padding: .45rem .75rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: .875rem;
+      color-scheme: dark;
+    }
+
+    .intrusions-count {
+      font-size: .875rem;
+      color: var(--text-dim);
+      margin-left: auto;
+    }
+
+    .events-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 1rem;
+    }
+
+    .event-tile {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      cursor: pointer;
+      transition: border-color .15s ease, transform .1s ease;
+    }
+    .event-tile:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+    }
+
+    .event-tile .thumb {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      display: block;
+      background: var(--border);
+    }
+
+    .event-tile .no-thumb {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--border);
+      color: var(--text-dim);
+      font-size: .8rem;
+    }
+
+    .event-tile .meta {
+      padding: .75rem 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .event-tile .time {
+      font-size: .85rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .event-tile .badges {
+      display: flex;
+      gap: .35rem;
+    }
+
+    .badge {
+      font-size: .65rem;
+      padding: .15rem .4rem;
+      border-radius: 4px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .badge-video {
+      background: rgba(99, 102, 241, .2);
+      color: #818cf8;
+    }
+    .badge-no-video {
+      background: rgba(239, 68, 68, .15);
+      color: #f87171;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--text-dim);
+      font-size: .95rem;
+    }
+
+    /* --- Video modal --- */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, .85);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .modal-overlay.open {
+      display: flex;
+    }
+
+    .modal-content {
+      position: relative;
+      max-width: 900px;
+      width: 100%;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .modal-content video {
+      width: 100%;
+      display: block;
+      background: #000;
+    }
+
+    .modal-info {
+      padding: .75rem 1rem;
+      font-size: .85rem;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .modal-close {
+      position: absolute;
+      top: .5rem;
+      right: .5rem;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      border: none;
+      background: rgba(0,0,0,.6);
+      color: #fff;
+      font-size: 1.1rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+    }
+    .modal-close:hover { background: rgba(0,0,0,.8); }
+
+    .modal-snapshot {
+      width: 100%;
+      display: block;
+      background: #000;
+    }
+
+    .modal-no-media {
+      padding: 3rem 1rem;
+      text-align: center;
+      color: var(--text-dim);
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <h1>Traffic Stats</h1>
-      <div class="controls">
+    </header>
+
+    <!-- Tab bar -->
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="traffic">Traffic</button>
+      <button class="tab-btn" data-tab="intrusions">Intrusions</button>
+    </div>
+
+    <!-- ============ Traffic tab ============ -->
+    <div class="tab-content active" id="tab-traffic">
+      <div class="controls" style="margin-bottom:1rem;">
         <button class="btn active" data-range="24h">Last 24 Hours</button>
         <button class="btn" data-range="week">Last Week</button>
       </div>
-    </header>
 
-    <div class="cards">
-      <div class="cards-row">
-        <div class="card">
-          <div class="label">Total vehicles</div>
-          <div class="value" id="total">--</div>
+      <div class="cards">
+        <div class="cards-row">
+          <div class="card">
+            <div class="label">Total vehicles</div>
+            <div class="value" id="total">--</div>
+          </div>
+          <div class="card">
+            <div class="label" style="color:#22d3ee">Left to Right</div>
+            <div class="value" id="total-ltr">--</div>
+          </div>
+          <div class="card">
+            <div class="label" style="color:#f472b6">Right to Left</div>
+            <div class="value" id="total-rtl">--</div>
+          </div>
         </div>
-        <div class="card">
-          <div class="label" style="color:#22d3ee">Left to Right</div>
-          <div class="value" id="total-ltr">--</div>
-        </div>
-        <div class="card">
-          <div class="label" style="color:#f472b6">Right to Left</div>
-          <div class="value" id="total-rtl">--</div>
+        <div class="cards-row">
+          <div class="card">
+            <div class="label">Peak (1 hour)</div>
+            <div class="value" id="peak-1h">--</div>
+            <div class="peak-time" id="peak-1h-time"></div>
+          </div>
+          <div class="card">
+            <div class="label">Peak (5 min)</div>
+            <div class="value" id="peak">--</div>
+            <div class="peak-time" id="peak-time"></div>
+          </div>
+          <div class="card">
+            <div class="label">Peak (1 min)</div>
+            <div class="value" id="peak-1min">--</div>
+            <div class="peak-time" id="peak-1min-time"></div>
+          </div>
         </div>
       </div>
-      <div class="cards-row">
-        <div class="card">
-          <div class="label">Peak (1 hour)</div>
-          <div class="value" id="peak-1h">--</div>
-          <div class="peak-time" id="peak-1h-time"></div>
-        </div>
-        <div class="card">
-          <div class="label">Peak (5 min)</div>
-          <div class="value" id="peak">--</div>
-          <div class="peak-time" id="peak-time"></div>
-        </div>
-        <div class="card">
-          <div class="label">Peak (1 min)</div>
-          <div class="value" id="peak-1min">--</div>
-          <div class="peak-time" id="peak-1min-time"></div>
-        </div>
+
+      <div class="chart-wrap">
+        <canvas id="chart"></canvas>
+      </div>
+
+      <div class="status-bar">
+        Auto-refreshes every 60 s &middot; Last update: <span id="last-update">--</span>
       </div>
     </div>
 
-    <div class="chart-wrap">
-      <canvas id="chart"></canvas>
+    <!-- ============ Intrusions tab ============ -->
+    <div class="tab-content" id="tab-intrusions">
+      <div class="intrusions-toolbar">
+        <label for="intrusion-date">Date:</label>
+        <input type="date" id="intrusion-date" />
+        <span class="intrusions-count" id="intrusion-count"></span>
+      </div>
+      <div id="events-grid" class="events-grid"></div>
     </div>
+  </div>
 
-    <div class="status-bar">
-      Auto-refreshes every 60 s &middot; Last update: <span id="last-update">--</span>
+  <!-- Video / snapshot modal -->
+  <div class="modal-overlay" id="modal-overlay">
+    <div class="modal-content" id="modal-content">
+      <button class="modal-close" id="modal-close">&times;</button>
+      <div id="modal-body"></div>
+      <div class="modal-info">
+        <span id="modal-time"></span>
+        <a id="modal-download" href="#" download style="color:var(--accent);font-size:.8rem;text-decoration:none;">Download</a>
+      </div>
     </div>
   </div>
 
@@ -194,9 +432,29 @@
     // -----------------------------------------------------------------------
     let currentRange = '24h';
     let chart = null;
+    let currentTab = 'traffic';
+    let intrusionRefreshTimer = null;
 
     // -----------------------------------------------------------------------
-    // Chart setup
+    // Tab switching
+    // -----------------------------------------------------------------------
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelector('.tab-btn.active').classList.remove('active');
+        btn.classList.add('active');
+        document.querySelector('.tab-content.active').classList.remove('active');
+        const tab = btn.dataset.tab;
+        document.getElementById('tab-' + tab).classList.add('active');
+        currentTab = tab;
+        if (tab === 'intrusions') {
+          loadIntrusionDates();
+          loadIntrusions();
+        }
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // Chart setup (Traffic)
     // -----------------------------------------------------------------------
     function initChart() {
       const ctx = document.getElementById('chart').getContext('2d');
@@ -287,12 +545,11 @@
         },
       });
 
-      // Force a reasonable height
       chart.canvas.parentNode.style.height = '380px';
     }
 
     // -----------------------------------------------------------------------
-    // Data fetching
+    // Traffic data fetching
     // -----------------------------------------------------------------------
     async function fetchData() {
       try {
@@ -307,7 +564,6 @@
 
     function formatPeakTime(timeStr) {
       if (!timeStr) return '';
-      // API: "YYYY-MM-DD HH:MM" or "YYYY-MM-DD HH" (UTC)
       const isHour = /^\d{4}-\d{2}-\d{2} \d{2}$/.test(timeStr);
       const iso = timeStr.replace(' ', 'T') + (isHour ? ':00:00' : ':00') + 'Z';
       const date = new Date(iso);
@@ -317,7 +573,6 @@
     }
 
     function updateUI({ buckets, total, total_left_to_right, total_right_to_left, peak_1min, peak_1min_time, peak_5min, peak_5min_time, peak_1h, peak_1h_time, no_collection_ranges = [] }) {
-      // Cards
       document.getElementById('total').textContent = total.toLocaleString();
       document.getElementById('total-ltr').textContent = total_left_to_right.toLocaleString();
       document.getElementById('total-rtl').textContent = total_right_to_left.toLocaleString();
@@ -328,9 +583,6 @@
       document.getElementById('peak-1h').textContent = (peak_1h ?? 0).toLocaleString();
       document.getElementById('peak-1h-time').textContent = formatPeakTime(peak_1h_time);
 
-      // Chart
-      // Parse bucket time strings into Date objects (UTC).
-      // API bucket format is "YYYY-MM-DD HH:MM" or "YYYY-MM-DD HH" for 1h; use ISO for reliable parsing.
       const labels = buckets.map(b => {
         const iso = b.time.replace(' ', 'T') + (b.time.length <= 13 ? ':00:00' : ':00') + 'Z';
         return new Date(iso);
@@ -341,7 +593,6 @@
       chart.data.datasets[1].data = buckets.map(b => b.left_to_right);
       chart.data.datasets[2].data = buckets.map(b => b.right_to_left);
 
-      // No-collection bands (sunset–sunrise): shade periods when data is not collected
       const annotations = {};
       no_collection_ranges.forEach((r, i) => {
         const xMin = new Date(r.start.replace(' ', 'T') + ':00Z').getTime();
@@ -357,21 +608,18 @@
       });
       chart.options.plugins.annotation.annotations = annotations;
 
-      // Adjust time unit based on range
       if (currentRange === 'week') {
         chart.options.scales.x.time.unit = 'day';
       } else {
         chart.options.scales.x.time.unit = 'hour';
       }
 
-      chart.update('none'); // skip animations for snappiness
-
-      document.getElementById('last-update').textContent =
-        new Date().toLocaleTimeString();
+      chart.update('none');
+      document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
     }
 
     // -----------------------------------------------------------------------
-    // Controls
+    // Traffic controls
     // -----------------------------------------------------------------------
     document.querySelectorAll('.btn[data-range]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -380,6 +628,162 @@
         currentRange = btn.dataset.range;
         fetchData();
       });
+    });
+
+    // -----------------------------------------------------------------------
+    // Intrusions
+    // -----------------------------------------------------------------------
+    const dateInput = document.getElementById('intrusion-date');
+    const eventsGrid = document.getElementById('events-grid');
+    const countEl = document.getElementById('intrusion-count');
+
+    // Default to today UTC
+    dateInput.value = new Date().toISOString().slice(0, 10);
+
+    dateInput.addEventListener('change', () => {
+      loadIntrusions();
+    });
+
+    async function loadIntrusionDates() {
+      try {
+        const resp = await fetch('/api/intrusions/dates');
+        if (!resp.ok) return;
+        const { dates } = await resp.json();
+        // Could highlight dates in the picker; for now just informational
+      } catch (e) {
+        console.error('Failed to load intrusion dates:', e);
+      }
+    }
+
+    async function loadIntrusions() {
+      const dateStr = dateInput.value;
+      if (!dateStr) return;
+
+      eventsGrid.innerHTML = '<div class="empty-state">Loading...</div>';
+
+      try {
+        const resp = await fetch(`/api/intrusions?date=${dateStr}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const { events } = await resp.json();
+
+        countEl.textContent = `${events.length} event${events.length !== 1 ? 's' : ''}`;
+
+        if (events.length === 0) {
+          eventsGrid.innerHTML = '<div class="empty-state">No intrusion events on this date</div>';
+          return;
+        }
+
+        eventsGrid.innerHTML = '';
+        events.forEach(ev => {
+          const tile = document.createElement('div');
+          tile.className = 'event-tile';
+
+          const hasVideo = !!ev.video_url;
+          const hasSnapshot = !!ev.snapshot_url;
+
+          if (hasSnapshot) {
+            const img = document.createElement('img');
+            img.className = 'thumb';
+            img.src = ev.snapshot_url;
+            img.alt = 'Snapshot ' + ev.timestamp;
+            img.loading = 'lazy';
+            tile.appendChild(img);
+          } else {
+            const ph = document.createElement('div');
+            ph.className = 'no-thumb';
+            ph.textContent = 'No snapshot';
+            tile.appendChild(ph);
+          }
+
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+
+          const timeEl = document.createElement('span');
+          timeEl.className = 'time';
+          const ts = new Date(ev.timestamp + 'Z');
+          timeEl.textContent = ts.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          meta.appendChild(timeEl);
+
+          const badges = document.createElement('span');
+          badges.className = 'badges';
+          if (hasVideo) {
+            const b = document.createElement('span');
+            b.className = 'badge badge-video';
+            b.textContent = 'Video';
+            badges.appendChild(b);
+          } else {
+            const b = document.createElement('span');
+            b.className = 'badge badge-no-video';
+            b.textContent = 'No video';
+            badges.appendChild(b);
+          }
+          meta.appendChild(badges);
+          tile.appendChild(meta);
+
+          tile.addEventListener('click', () => openModal(ev));
+          eventsGrid.appendChild(tile);
+        });
+      } catch (err) {
+        console.error('Intrusions fetch error:', err);
+        eventsGrid.innerHTML = '<div class="empty-state">Failed to load events</div>';
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Video modal
+    // -----------------------------------------------------------------------
+    const modalOverlay = document.getElementById('modal-overlay');
+    const modalBody = document.getElementById('modal-body');
+    const modalTime = document.getElementById('modal-time');
+    const modalDownload = document.getElementById('modal-download');
+    const modalCloseBtn = document.getElementById('modal-close');
+
+    function openModal(ev) {
+      modalBody.innerHTML = '';
+
+      const ts = new Date(ev.timestamp + 'Z');
+      modalTime.textContent = ts.toLocaleString();
+
+      if (ev.video_url) {
+        const video = document.createElement('video');
+        video.controls = true;
+        video.autoplay = true;
+        video.preload = 'auto';
+        video.src = ev.video_url;
+        modalBody.appendChild(video);
+        modalDownload.href = ev.video_url;
+        modalDownload.style.display = '';
+        modalDownload.textContent = 'Download video';
+      } else if (ev.snapshot_url) {
+        const img = document.createElement('img');
+        img.className = 'modal-snapshot';
+        img.src = ev.snapshot_url;
+        img.alt = 'Snapshot';
+        modalBody.appendChild(img);
+        modalDownload.href = ev.snapshot_url;
+        modalDownload.style.display = '';
+        modalDownload.textContent = 'Download snapshot';
+      } else {
+        modalBody.innerHTML = '<div class="modal-no-media">No media available for this event</div>';
+        modalDownload.style.display = 'none';
+      }
+
+      modalOverlay.classList.add('open');
+    }
+
+    function closeModal() {
+      modalOverlay.classList.remove('open');
+      // Stop any playing video
+      const vid = modalBody.querySelector('video');
+      if (vid) { vid.pause(); vid.src = ''; }
+    }
+
+    modalCloseBtn.addEventListener('click', closeModal);
+    modalOverlay.addEventListener('click', (e) => {
+      if (e.target === modalOverlay) closeModal();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
     });
 
     // -----------------------------------------------------------------------
