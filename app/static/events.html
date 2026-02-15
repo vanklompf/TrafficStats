@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <title>Events – TrafficStats</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e4e4e7;
+      --text-dim: #8b8d97;
+      --accent: #6366f1;
+      --accent-glow: rgba(99, 102, 241, .25);
+      --ltr: #22d3ee;
+      --rtl: #f472b6;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    .nav {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+    }
+
+    .nav a {
+      padding: .5rem 1.1rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text-dim);
+      font-size: .875rem;
+      text-decoration: none;
+      transition: all .15s ease;
+    }
+    .nav a:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .nav a.active {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    .events-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .events-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-variant-numeric: tabular-nums;
+    }
+    .events-table th,
+    .events-table td {
+      padding: .75rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    .events-table th {
+      font-size: .75rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-dim);
+      font-weight: 600;
+    }
+    .events-table tr:last-child td {
+      border-bottom: none;
+    }
+    .events-table tbody tr:hover {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .direction-ltr { color: var(--ltr); }
+    .direction-rtl { color: var(--rtl); }
+
+    .pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      padding: 1rem 1.25rem;
+      border-top: 1px solid var(--border);
+      font-size: .875rem;
+      color: var(--text-dim);
+    }
+
+    .pagination-info {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pagination-btns {
+      display: flex;
+      gap: .5rem;
+      align-items: center;
+    }
+
+    .btn {
+      padding: .4rem .9rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text-dim);
+      font-size: .875rem;
+      cursor: pointer;
+      transition: all .15s ease;
+    }
+    .btn:hover:not(:disabled) {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    .filter-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      margin-bottom: 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-size: 0.875rem;
+      color: var(--text-dim);
+    }
+    .filter-banner-actions {
+      display: flex;
+      gap: 1rem;
+    }
+    .filter-banner a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .filter-banner a:hover { text-decoration: underline; }
+
+    .empty-state {
+      padding: 3rem 1.25rem;
+      text-align: center;
+      color: var(--text-dim);
+    }
+
+    .footer {
+      text-align: center;
+      margin-top: 2.5rem;
+      padding-top: 1.25rem;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim);
+      font-size: 0.85em;
+    }
+    .footer a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Traffic Stats</h1>
+      <nav class="nav">
+        <a href="/">Dashboard</a>
+        <a href="/events" class="active">Events</a>
+      </nav>
+    </header>
+
+    <div class="filter-banner" id="filter-banner" style="display: none;">
+      <span id="filter-text"></span>
+      <span class="filter-banner-actions">
+        <a href="/events" id="filter-show-full">Show in full list</a>
+        <a href="/events" id="filter-clear">Clear filter</a>
+      </span>
+    </div>
+
+    <div class="events-wrap">
+      <table class="events-table" id="events-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Timestamp</th>
+            <th>Direction</th>
+          </tr>
+        </thead>
+        <tbody id="events-body">
+          <tr><td colspan="3" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+      <div class="pagination" id="pagination" style="display: none;">
+        <span class="pagination-info" id="pagination-info"></span>
+        <div class="pagination-btns">
+          <button class="btn" id="btn-prev" disabled>Previous</button>
+          <span id="page-nums"></span>
+          <button class="btn" id="btn-next" disabled>Next</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <a href="/">← Back to Dashboard</a>
+      <span style="opacity: 0.7; margin-left: 15px;">Version <span id="app-version">--</span></span>
+    </div>
+  </div>
+
+  <script>
+    const PER_PAGE = 50;
+    let currentPage = 1;
+    let filterFrom = null;
+    let filterTo = null;
+
+    function parseFilterFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      const from = params.get('from');
+      const to = params.get('to');
+      if (from && to) {
+        filterFrom = from;
+        filterTo = to;
+      } else {
+        filterFrom = null;
+        filterTo = null;
+      }
+    }
+
+    function formatFilterTime(s) {
+      if (!s || s.length < 16) return s;
+      const iso = s.replace(' ', 'T') + (s.length === 16 ? ':00' : '') + 'Z';
+      const d = new Date(iso);
+      return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+    }
+
+    function updateFilterBanner() {
+      const banner = document.getElementById('filter-banner');
+      const text = document.getElementById('filter-text');
+      const showFullLink = document.getElementById('filter-show-full');
+      if (filterFrom && filterTo) {
+        banner.style.display = 'flex';
+        text.textContent = 'Showing events from ' + formatFilterTime(filterFrom) + ' to ' + formatFilterTime(filterTo);
+        showFullLink.href = '/events';
+        fetchPageForRange(filterTo).then((page) => {
+          showFullLink.href = '/events?page=' + page;
+        }).catch(() => {});
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
+    async function fetchPageForRange(toTs) {
+      const url = new URL('/api/events/page_for_range', window.location.origin);
+      url.searchParams.set('to_ts', toTs);
+      url.searchParams.set('per_page', String(PER_PAGE));
+      const resp = await fetch(url.toString());
+      if (!resp.ok) throw new Error('Failed to get page');
+      const data = await resp.json();
+      return data.page;
+    }
+
+    function formatTimestamp(ts) {
+      if (!ts) return '--';
+      const iso = ts.replace(' ', 'T') + 'Z';
+      const d = new Date(iso);
+      return d.toLocaleString(undefined, {
+        dateStyle: 'short',
+        timeStyle: 'medium',
+      });
+    }
+
+    function directionLabel(dir) {
+      if (dir === 'LeftToRight') return 'Left → Right';
+      if (dir === 'RightToLeft') return 'Right → Left';
+      return dir || '—';
+    }
+
+    function directionClass(dir) {
+      if (dir === 'LeftToRight') return 'direction-ltr';
+      if (dir === 'RightToLeft') return 'direction-rtl';
+      return '';
+    }
+
+    function buildEventsUrl(page) {
+      const url = new URL('/api/events', window.location.origin);
+      url.searchParams.set('page', String(page));
+      url.searchParams.set('per_page', String(PER_PAGE));
+      if (filterFrom) url.searchParams.set('from_ts', filterFrom);
+      if (filterTo) url.searchParams.set('to_ts', filterTo);
+      return url.toString();
+    }
+
+    async function fetchEvents(page = 1) {
+      const tbody = document.getElementById('events-body');
+      tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Loading…</td></tr>';
+
+      try {
+        const resp = await fetch(buildEventsUrl(page));
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderEvents(data);
+        renderPagination(data);
+      } catch (err) {
+        console.error('Fetch error:', err);
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">Failed to load events.</td></tr>';
+      }
+    }
+
+    function renderEvents(data) {
+      const tbody = document.getElementById('events-body');
+      const startId = (data.page - 1) * data.per_page;
+
+      if (!data.events || data.events.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" class="empty-state">No events recorded yet.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = data.events.map((ev, i) => {
+        const rowNum = startId + i + 1;
+        const cls = directionClass(ev.direction);
+        return `<tr>
+          <td>${rowNum}</td>
+          <td>${formatTimestamp(ev.timestamp)}</td>
+          <td class="${cls}">${directionLabel(ev.direction)}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    function renderPagination(data) {
+      const wrap = document.getElementById('pagination');
+      const info = document.getElementById('pagination-info');
+      const btnPrev = document.getElementById('btn-prev');
+      const btnNext = document.getElementById('btn-next');
+      const pageNums = document.getElementById('page-nums');
+
+      if (data.total === 0) {
+        wrap.style.display = 'none';
+        return;
+      }
+
+      wrap.style.display = 'flex';
+      const start = (data.page - 1) * data.per_page + 1;
+      const end = Math.min(data.page * data.per_page, data.total);
+      info.textContent = `${start}–${end} of ${data.total.toLocaleString()} events`;
+
+      btnPrev.disabled = data.page <= 1;
+      btnNext.disabled = data.page >= data.total_pages;
+
+      btnPrev.onclick = () => { currentPage = data.page - 1; fetchEvents(currentPage); };
+      btnNext.onclick = () => { currentPage = data.page + 1; fetchEvents(currentPage); };
+
+      pageNums.textContent = `Page ${data.page} of ${data.total_pages}`;
+    }
+
+    async function fetchVersion() {
+      try {
+        const resp = await fetch('/api/version');
+        if (!resp.ok) return;
+        const { version } = await resp.json();
+        document.getElementById('app-version').textContent = version || 'dev';
+      } catch (e) { /* ignore */ }
+    }
+
+    parseFilterFromUrl();
+    updateFilterBanner();
+    currentPage = 1;
+    fetchEvents(1);
+    fetchVersion();
+  </script>
+</body>
+</html>

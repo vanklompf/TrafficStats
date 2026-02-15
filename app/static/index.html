@@ -170,9 +170,12 @@
       flex-wrap: wrap;
     }
 
-    .intrusions-toolbar label {
-      font-size: .875rem;
-      color: var(--text-dim);
+    .date-nav-btn {
+      padding: .45rem .7rem;
+      font-size: 1rem;
+      line-height: 1;
+      min-width: 2.2rem;
+      text-align: center;
     }
 
     .intrusions-toolbar input[type="date"] {
@@ -349,12 +352,12 @@
 
     <!-- Tab bar -->
     <div class="tabs">
-      <button class="tab-btn active" data-tab="traffic">Traffic</button>
-      <button class="tab-btn" data-tab="intrusions">Intrusions</button>
+      <button class="tab-btn active" data-tab="intrusions">Intrusions</button>
+      <button class="tab-btn" data-tab="traffic">Traffic</button>
     </div>
 
     <!-- ============ Traffic tab ============ -->
-    <div class="tab-content active" id="tab-traffic">
+    <div class="tab-content" id="tab-traffic">
       <div class="controls" style="margin-bottom:1rem;">
         <button class="btn active" data-range="24h">Last 24 Hours</button>
         <button class="btn" data-range="week">Last Week</button>
@@ -404,10 +407,11 @@
     </div>
 
     <!-- ============ Intrusions tab ============ -->
-    <div class="tab-content" id="tab-intrusions">
+    <div class="tab-content active" id="tab-intrusions">
       <div class="intrusions-toolbar">
-        <label for="intrusion-date">Date:</label>
+        <button class="btn date-nav-btn" id="date-prev" title="Previous day">&larr;</button>
         <input type="date" id="intrusion-date" />
+        <button class="btn date-nav-btn" id="date-next" title="Next day">&rarr;</button>
         <span class="intrusions-count" id="intrusion-count"></span>
       </div>
       <div id="events-grid" class="events-grid"></div>
@@ -432,7 +436,7 @@
     // -----------------------------------------------------------------------
     let currentRange = '24h';
     let chart = null;
-    let currentTab = 'traffic';
+    let currentTab = 'intrusions';
     let intrusionRefreshTimer = null;
 
     // -----------------------------------------------------------------------
@@ -644,6 +648,16 @@
       loadIntrusions();
     });
 
+    function shiftDate(days) {
+      const d = new Date(dateInput.value + 'T00:00:00');
+      d.setDate(d.getDate() + days);
+      dateInput.value = d.toISOString().slice(0, 10);
+      loadIntrusions();
+    }
+
+    document.getElementById('date-prev').addEventListener('click', () => shiftDate(-1));
+    document.getElementById('date-next').addEventListener('click', () => shiftDate(1));
+
     async function loadIntrusionDates() {
       try {
         const resp = await fetch('/api/intrusions/dates');
@@ -792,6 +806,8 @@
     initChart();
     fetchData();
     setInterval(fetchData, 60_000);
+    loadIntrusionDates();
+    loadIntrusions();
   </script>
 </body>
 </html>
