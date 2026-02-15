@@ -136,14 +136,17 @@ async def api_intrusions(date: str = Query(default="")):
     events = get_intrusion_events(date)
     enriched = match_media_for_events(events, date)
 
-    # Build URLs for each event's media
+    # Build URLs for each event's media (file may live in an adjacent
+    # date directory when the camera timezone differs from UTC).
     for ev in enriched:
+        snap_date = ev.get("snapshot_date") or date
+        vid_date = ev.get("video_date") or date
         if ev["snapshot"]:
-            ev["snapshot_url"] = f"/media/snapshot/{date}/{ev['snapshot']}"
+            ev["snapshot_url"] = f"/media/snapshot/{snap_date}/{ev['snapshot']}"
         else:
             ev["snapshot_url"] = None
         if ev["video"]:
-            ev["video_url"] = f"/media/video/{date}/{ev['video']}"
+            ev["video_url"] = f"/media/video/{vid_date}/{ev['video']}"
         else:
             ev["video_url"] = None
 
