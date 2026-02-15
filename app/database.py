@@ -27,41 +27,66 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def init_db():
-    """Create the events table if it doesn't exist."""
+    """Create the events table if it doesn't exist, and migrate schema."""
     conn = _get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT NOT NULL,
             camera TEXT NOT NULL DEFAULT '',
-            direction TEXT NOT NULL DEFAULT ''
+            direction TEXT NOT NULL DEFAULT '',
+            event_type TEXT NOT NULL DEFAULT 'traffic',
+            ivs_name TEXT NOT NULL DEFAULT ''
         )
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_events_timestamp
         ON events (timestamp)
     """)
+
+    # Migrate: add columns if upgrading from older schema
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "event_type" not in existing:
+        conn.execute("ALTER TABLE events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'traffic'")
+    if "ivs_name" not in existing:
+        conn.execute("ALTER TABLE events ADD COLUMN ivs_name TEXT NOT NULL DEFAULT ''")
+
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_events_type_timestamp
+        ON events (event_type, timestamp)
+    """)
     conn.commit()
     logger.info("Database initialised at %s", DB_PATH)
 
 
-def insert_event(camera: str = "", direction: str = ""):
-    """Insert a single car-passing event with the current UTC timestamp.
-    Only inserts when the current time is between sunrise and sunset at the
-    configured location (CITY). If not set, records 24/7.
+def insert_event(
+    camera: str = "",
+    direction: str = "",
+    event_type: str = "traffic",
+    ivs_name: str = "",
+):
+    """Insert a single event with the current UTC timestamp.
+
+    For traffic events, only inserts when the current time is between sunrise
+    and sunset at the configured location (CITY). Intrusion events are always
+    recorded regardless of time of day.
     """
     now_utc = datetime.now(timezone.utc)
-    if not is_daytime(now_utc):
-        logger.debug("Skipping event outside collection window (sunrise–sunset)")
+    if event_type == "traffic" and not is_daytime(now_utc):
+        logger.debug("Skipping traffic event outside collection window (sunrise–sunset)")
         return
     conn = _get_conn()
     now = now_utc.strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
-        "INSERT INTO events (timestamp, camera, direction) VALUES (?, ?, ?)",
-        (now, camera, direction),
+        "INSERT INTO events (timestamp, camera, direction, event_type, ivs_name) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (now, camera, direction, event_type, ivs_name),
     )
     conn.commit()
-    logger.info("Event recorded: camera=%s direction=%s at %s", camera, direction, now)
+    logger.info(
+        "Event recorded: type=%s ivs=%s camera=%s direction=%s at %s",
+        event_type, ivs_name, camera, direction, now,
+    )
 
 
 def get_stats(range_key: str) -> dict:
@@ -102,7 +127,7 @@ def get_stats(range_key: str) -> dict:
             SUM(CASE WHEN direction = 'LeftToRight' THEN 1 ELSE 0 END) AS left_to_right,
             SUM(CASE WHEN direction = 'RightToLeft' THEN 1 ELSE 0 END) AS right_to_left
         FROM events
-        WHERE timestamp >= ?
+        WHERE timestamp >= ? AND event_type = 'traffic'
         GROUP BY bucket
         ORDER BY bucket
         """,
@@ -128,7 +153,7 @@ def get_stats(range_key: str) -> dict:
         SELECT strftime('%Y-%m-%d %H:%M', timestamp) AS minute,
                COUNT(*) AS cnt
         FROM events
-        WHERE timestamp >= ?
+        WHERE timestamp >= ? AND event_type = 'traffic'
         GROUP BY minute
         ORDER BY minute
         """,
@@ -200,3 +225,37 @@ def get_stats(range_key: str) -> dict:
         "peak_1h_time": peak_1h_time,
         "no_collection_ranges": no_collection_ranges,
     }
+
+
+def get_intrusion_events(date_str: str) -> list[dict]:
+    """
+    Return all intrusion events for a given date (YYYY-MM-DD, UTC).
+
+    Returns list of {'id': int, 'timestamp': str} sorted by timestamp.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT id, timestamp
+        FROM events
+        WHERE event_type = 'intrusion'
+          AND timestamp >= ? AND timestamp < date(?, '+1 day')
+        ORDER BY timestamp
+        """,
+        (date_str, date_str),
+    ).fetchall()
+    return [{"id": row["id"], "timestamp": row["timestamp"]} for row in rows]
+
+
+def get_intrusion_dates() -> list[str]:
+    """Return distinct dates (YYYY-MM-DD) that have intrusion events."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT date(timestamp) AS d
+        FROM events
+        WHERE event_type = 'intrusion'
+        ORDER BY d DESC
+        """
+    ).fetchall()
+    return [row["d"] for row in rows]

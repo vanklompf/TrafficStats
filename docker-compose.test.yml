@@ -8,5 +8,6 @@ services:
       - "3897:8080"
     volumes:
       - ./data-test:/data
+      - /mnt/nas/media/backup/kamery/kamera_front:/media/kamera_front:ro
     env_file:
       - .env

@@ -40,6 +40,7 @@ class DahuaListener:
         events: str = "CrossLineDetection",
         protocol: str = "http",
         ivs_names: str = "",
+        intrusion_ivs_name: str = "intrusion",
     ):
         self.host = host
         self.port = port
@@ -47,9 +48,10 @@ class DahuaListener:
         self.password = password
         self.events = events
         self.protocol = protocol
-        self.ivs_names: set[str] = {
+        self.traffic_ivs_names: set[str] = {
             n.strip() for n in ivs_names.split(",") if n.strip()
         }
+        self.intrusion_ivs_name = intrusion_ivs_name.strip()
         self.url = EVENT_URL_TEMPLATE.format(
             protocol=protocol,
             host=host,
@@ -158,18 +160,31 @@ class DahuaListener:
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        if self.ivs_names and ivs_name not in self.ivs_names:
+        # Classify the event
+        event_type = None
+        if ivs_name and ivs_name == self.intrusion_ivs_name:
+            event_type = "intrusion"
+        elif not self.traffic_ivs_names or ivs_name in self.traffic_ivs_names:
+            event_type = "traffic"
+
+        if event_type is None:
             logger.debug(
-                "Ignoring event with Name=%r (allowed: %s)", ivs_name, self.ivs_names
+                "Ignoring event with Name=%r (traffic: %s, intrusion: %s)",
+                ivs_name, self.traffic_ivs_names, self.intrusion_ivs_name,
             )
             return
 
         camera_name = f"{self.host}"
         logger.info(
-            "Event: code=%s name=%s direction=%s camera=%s",
-            code, ivs_name, direction, camera_name,
+            "Event: type=%s code=%s name=%s direction=%s camera=%s",
+            event_type, code, ivs_name, direction, camera_name,
         )
-        insert_event(camera=camera_name, direction=direction)
+        insert_event(
+            camera=camera_name,
+            direction=direction,
+            event_type=event_type,
+            ivs_name=ivs_name,
+        )
 
 
 def create_listener_from_env() -> DahuaListener:
@@ -187,4 +202,5 @@ def create_listener_from_env() -> DahuaListener:
         events=os.environ.get("DAHUA_EVENTS", "All"),
         protocol=os.environ.get("DAHUA_PROTOCOL", "http"),
         ivs_names=os.environ.get("DAHUA_IVS_NAMES", "CarDetection"),
+        intrusion_ivs_name=os.environ.get("DAHUA_INTRUSION_IVS_NAME", "intrusion"),
     )
