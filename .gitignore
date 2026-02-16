@@ -11,4 +11,4 @@ venv/
 *.egg-info/
 dist/
 build/
-data-test/*
+data-test/

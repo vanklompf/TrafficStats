@@ -25,10 +25,6 @@ from app.intrusions import (
     get_cached_video_path,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 _listener: DahuaListener | None = None
@@ -38,6 +34,12 @@ _listener: DahuaListener | None = None
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
     global _listener
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
     # Initialise database
     init_db()
