@@ -11,8 +11,7 @@ import logging
 import os
 import threading
 
-import requests
-from requests.auth import HTTPDigestAuth
+import httpx
 
 from app.database import insert_event
 
@@ -87,36 +86,38 @@ class DahuaListener:
     def _run(self):
         """Main loop: connect, stream, reconnect on failure."""
         backoff = INITIAL_BACKOFF
-        while not self._stop_event.is_set():
-            try:
-                logger.info("Connecting to %s", self.url)
-                resp = requests.get(
-                    self.url,
-                    stream=True,
-                    auth=HTTPDigestAuth(self.user, self.password),
-                    timeout=(10, 300),  # 10s connect, 300s read timeout
-                )
-                resp.raise_for_status()
-                logger.info("Connected to Dahua camera at %s:%s", self.host, self.port)
-                backoff = INITIAL_BACKOFF  # reset on success
+        client = httpx.Client(
+            auth=httpx.DigestAuth(self.user, self.password),
+            timeout=httpx.Timeout(10.0, read=300.0),
+        )
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    logger.info("Connecting to %s", self.url)
+                    with client.stream("GET", self.url) as resp:
+                        resp.raise_for_status()
+                        logger.info("Connected to Dahua camera at %s:%s", self.host, self.port)
+                        backoff = INITIAL_BACKOFF  # reset on success
 
-                self._consume_stream(resp)
+                        self._consume_stream(resp)
 
-            except requests.ReadTimeout:
-                logger.warning("Read timeout -- camera may have stopped sending data")
-            except requests.ConnectionError as exc:
-                logger.error("Connection error: %s", exc)
-            except requests.HTTPError as exc:
-                logger.error("HTTP error: %s", exc)
-            except Exception as exc:
-                logger.exception("Unexpected error in event listener: %s", exc)
+                except httpx.ReadTimeout:
+                    logger.warning("Read timeout -- camera may have stopped sending data")
+                except httpx.ConnectError as exc:
+                    logger.error("Connection error: %s", exc)
+                except httpx.HTTPStatusError as exc:
+                    logger.error("HTTP error: %s", exc)
+                except Exception as exc:
+                    logger.exception("Unexpected error in event listener: %s", exc)
 
-            if not self._stop_event.is_set():
-                logger.info("Reconnecting in %ds ...", backoff)
-                self._stop_event.wait(backoff)
-                backoff = min(backoff * 2, MAX_BACKOFF)
+                if not self._stop_event.is_set():
+                    logger.info("Reconnecting in %ds ...", backoff)
+                    self._stop_event.wait(backoff)
+                    backoff = min(backoff * 2, MAX_BACKOFF)
+        finally:
+            client.close()
 
-    def _consume_stream(self, resp: requests.Response):
+    def _consume_stream(self, resp: httpx.Response):
         """
         Read the multipart event stream line by line.
 
@@ -125,13 +126,11 @@ class DahuaListener:
         We only care about action=Start events.
         """
         buffer = ""
-        for chunk in resp.iter_content(chunk_size=1024):
+        for chunk in resp.iter_bytes(chunk_size=1024):
             if self._stop_event.is_set():
                 break
-            if chunk is None:
-                continue
 
-            buffer += chunk.decode("utf-8", errors="ignore") if isinstance(chunk, bytes) else chunk
+            buffer += chunk.decode("utf-8", errors="ignore")
             # Process complete lines
             while "\r\n" in buffer:
                 line, buffer = buffer.split("\r\n", 1)

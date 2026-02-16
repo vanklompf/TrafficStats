@@ -2,13 +2,13 @@
 
 ## High Priority
 
-1. **Synchronous `requests` in async FastAPI** — The Dahua listener uses `requests` (synchronous HTTP client). While it runs in a background thread, consider switching to `httpx` for consistency.
+1. ~~**Synchronous `requests` in async FastAPI**~~ — Resolved: replaced `requests` with `httpx` in the Dahua listener.
 
 ## Medium Priority
 
 2. **Shadowed `range` builtin in `main.py`** — The `api_stats` parameter `range` shadows the Python builtin. Rename to `range_key` or `time_range`.
 
-3. **Race condition in video conversion** — Two concurrent requests for the same video can both start ffmpeg. Add a per-file lock or "in progress" sentinel.
+3. ~~**Race condition in video conversion**~~ — Resolved: added per-file lock in `convert_dav_to_mp4` so concurrent requests wait for the first conversion.
 
 4. **`_enforce_cache_limit` issues in `intrusions.py`** — Calls `.stat()` twice per file; `all_files.pop(0)` is O(n); `FileNotFoundError` not caught if a file disappears between `stat()` and `unlink()`; `VIDEO_CACHE_MAX_BYTES` is a `float` instead of `int`.
 

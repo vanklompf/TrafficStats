@@ -76,6 +76,16 @@ _DAV_RE = re.compile(
 )
 
 _cache_lock = threading.Lock()
+_conversion_locks: dict[str, threading.Lock] = {}
+_conversion_locks_guard = threading.Lock()
+
+
+def _get_conversion_lock(key: str) -> threading.Lock:
+    """Return a per-file lock for the given conversion key (created on first use)."""
+    with _conversion_locks_guard:
+        if key not in _conversion_locks:
+            _conversion_locks[key] = threading.Lock()
+        return _conversion_locks[key]
 
 
 def _parse_jpg_timestamp(filename: str) -> datetime | None:
@@ -230,6 +240,10 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
     """
     Convert a DAV file to a browser-friendly MP4 using ffmpeg.
 
+    Uses a per-file lock so concurrent requests for the same video
+    wait for the first conversion instead of spawning duplicate ffmpeg
+    processes.
+
     Returns the path to the cached MP4, or None on failure.
     """
     source = Path(MEDIA_PATH) / date_str / dav_filename
@@ -237,46 +251,50 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
         logger.warning("DAV source not found: %s", source)
         return None
 
-    cached = get_cached_video_path(date_str, dav_filename)
-    if cached is not None:
-        return cached
+    lock = _get_conversion_lock(f"{date_str}/{dav_filename}")
+    with lock:
+        # Re-check cache under lock; another request may have finished
+        # the conversion while we were waiting.
+        cached = get_cached_video_path(date_str, dav_filename)
+        if cached is not None:
+            return cached
 
-    cache_dir = _ensure_cache_dir(date_str)
-    mp4_name = Path(dav_filename).stem + ".mp4"
-    output = cache_dir / mp4_name
-    tmp_output = output.with_suffix(".tmp.mp4")
+        cache_dir = _ensure_cache_dir(date_str)
+        mp4_name = Path(dav_filename).stem + ".mp4"
+        output = cache_dir / mp4_name
+        tmp_output = output.with_suffix(".tmp.mp4")
 
-    cmd = [
-        "ffmpeg", "-y", "-i", str(source),
-        "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
-        "-pix_fmt", "yuv420p",
-        "-b:v", "1500k", "-maxrate", "2000k", "-bufsize", "3000k",
-        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-        "-movflags", "+faststart",
-        str(tmp_output),
-    ]
+        cmd = [
+            "ffmpeg", "-y", "-i", str(source),
+            "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
+            "-pix_fmt", "yuv420p",
+            "-b:v", "1500k", "-maxrate", "2000k", "-bufsize", "3000k",
+            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+            "-movflags", "+faststart",
+            str(tmp_output),
+        ]
 
-    try:
-        logger.info("Converting %s -> %s", source, output)
-        subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            timeout=120,
-        )
-        tmp_output.rename(output)
-        logger.info("Conversion complete: %s (%.1f KB)", output, output.stat().st_size / 1024)
-    except subprocess.CalledProcessError as e:
-        logger.error("ffmpeg failed for %s: %s", source, e.stderr[-500:] if e.stderr else "")
-        tmp_output.unlink(missing_ok=True)
-        return None
-    except subprocess.TimeoutExpired:
-        logger.error("ffmpeg timed out for %s", source)
-        tmp_output.unlink(missing_ok=True)
-        return None
+        try:
+            logger.info("Converting %s -> %s", source, output)
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            tmp_output.rename(output)
+            logger.info("Conversion complete: %s (%.1f KB)", output, output.stat().st_size / 1024)
+        except subprocess.CalledProcessError as e:
+            logger.error("ffmpeg failed for %s: %s", source, e.stderr[-500:] if e.stderr else "")
+            tmp_output.unlink(missing_ok=True)
+            return None
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg timed out for %s", source)
+            tmp_output.unlink(missing_ok=True)
+            return None
 
-    _enforce_cache_limit()
-    return output
+        _enforce_cache_limit()
+        return output
 
 
 def _enforce_cache_limit():
