@@ -10,7 +10,7 @@
 
 4. **No ARIA attributes** — The tab widget, modal dialog, and chart canvas lack proper accessibility semantics (roles, labels, focus management).
 
-5. **Hardcoded NAS path in docker-compose** — `/mnt/nas/media/backup/kamery/kamera_front` is machine-specific. Parameterize via an env var.
+5. ~~**Hardcoded NAS path in docker-compose** — `/mnt/nas/media/backup/kamery/kamera_front` is machine-specific. Parameterize via an env var.~~
 
 6. **CI workflow issues (`docker-publish.yml`)** — No test step before push; ~~`build-push-action` at v5 (latest is v6)~~.
 

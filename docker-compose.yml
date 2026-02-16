@@ -7,6 +7,6 @@ services:
       - "3896:8080"
     volumes:
       - ./data:/data
-      - /mnt/nas/media/backup/kamery/kamera_front:/media/kamera_front:ro
+      - ${MEDIA_HOST_PATH:?MEDIA_HOST_PATH must be set}:/media/kamera_front:ro
     env_file:
       - .env
