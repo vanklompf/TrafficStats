@@ -33,9 +33,9 @@ class DahuaListener:
     def __init__(
         self,
         host: str,
-        port: int = 80,
         user: str,
         password: str,
+        port: int = 80,
         events: str = "CrossLineDetection",
         protocol: str = "http",
         ivs_names: str = "",
