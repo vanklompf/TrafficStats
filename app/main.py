@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.database import init_db, get_stats, get_intrusion_events, get_intrusion_dates
+from app.database import init_db, close_conn, get_stats, get_intrusion_events, get_intrusion_dates
 from app.dahua import DahuaListener, create_listener_from_env
 from app.intrusions import (
     MEDIA_PATH,
@@ -54,6 +54,7 @@ async def lifespan(app: FastAPI):
     # Shutdown
     if _listener is not None:
         _listener.stop()
+    close_conn()
 
 
 app = FastAPI(title="TrafficStats", lifespan=lifespan)
@@ -88,9 +89,7 @@ async def api_stats(range: str = Query("24h", pattern="^(24h|week)$")):
 @app.get("/api/health")
 async def health():
     """Simple health-check endpoint."""
-    camera_connected = _listener is not None and (
-        _listener._thread is not None and _listener._thread.is_alive()
-    )
+    camera_connected = _listener is not None and _listener.is_alive()
     return {
         "status": "ok",
         "camera_listener": "running" if camera_connected else "stopped",

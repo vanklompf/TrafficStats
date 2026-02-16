@@ -78,6 +78,10 @@ class DahuaListener:
         self._stop_event.set()
         logger.info("Dahua listener stop requested")
 
+    def is_alive(self) -> bool:
+        """Return True if the listener thread is running."""
+        return self._thread is not None and self._thread.is_alive()
+
     # -- internals ------------------------------------------------------------
 
     def _run(self):
@@ -90,7 +94,7 @@ class DahuaListener:
                     self.url,
                     stream=True,
                     auth=HTTPDigestAuth(self.user, self.password),
-                    timeout=(10, None),  # 10s connect, no read timeout
+                    timeout=(10, 300),  # 10s connect, 300s read timeout
                 )
                 resp.raise_for_status()
                 logger.info("Connected to Dahua camera at %s:%s", self.host, self.port)
@@ -98,6 +102,8 @@ class DahuaListener:
 
                 self._consume_stream(resp)
 
+            except requests.ReadTimeout:
+                logger.warning("Read timeout -- camera may have stopped sending data")
             except requests.ConnectionError as exc:
                 logger.error("Connection error: %s", exc)
             except requests.HTTPError as exc:
@@ -187,12 +193,12 @@ class DahuaListener:
         )
 
 
-def create_listener_from_env() -> DahuaListener:
+def create_listener_from_env() -> DahuaListener | None:
     """Build a DahuaListener from environment variables."""
     host = os.environ.get("DAHUA_HOST", "")
     if not host:
         logger.warning("DAHUA_HOST not set -- listener will not start")
-        return None  # type: ignore[return-value]
+        return None
 
     return DahuaListener(
         host=host,

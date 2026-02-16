@@ -1,3 +1,5 @@
+"""SQLite database layer for event storage and retrieval."""
+
 import sqlite3
 import threading
 import os
@@ -18,12 +20,20 @@ def _get_conn() -> sqlite3.Connection:
     conn = getattr(_local, "conn", None)
     if conn is None:
         os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=5000")
         _local.conn = conn
     return conn
+
+
+def close_conn() -> None:
+    """Close the thread-local SQLite connection if open."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        conn.close()
+        _local.conn = None
 
 
 def init_db():

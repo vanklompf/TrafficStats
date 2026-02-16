@@ -1,6 +1,6 @@
-fastapi>=0.115.0
-uvicorn>=0.34.0
-requests>=2.32.0
-astral>=3.0
-geopy>=2.4.0
-timezonefinder>=6.0
+fastapi==0.129.0
+uvicorn==0.40.0
+requests==2.32.5
+astral==3.2
+geopy==2.4.1
+timezonefinder==8.2.1

@@ -451,7 +451,6 @@
         document.getElementById('tab-' + tab).classList.add('active');
         currentTab = tab;
         if (tab === 'intrusions') {
-          loadIntrusionDates();
           loadIntrusions();
         }
       });
@@ -658,17 +657,6 @@
     document.getElementById('date-prev').addEventListener('click', () => shiftDate(-1));
     document.getElementById('date-next').addEventListener('click', () => shiftDate(1));
 
-    async function loadIntrusionDates() {
-      try {
-        const resp = await fetch('/api/intrusions/dates');
-        if (!resp.ok) return;
-        const { dates } = await resp.json();
-        // Could highlight dates in the picker; for now just informational
-      } catch (e) {
-        console.error('Failed to load intrusion dates:', e);
-      }
-    }
-
     async function loadIntrusions() {
       const dateStr = dateInput.value;
       if (!dateStr) return;
@@ -806,7 +794,6 @@
     initChart();
     fetchData();
     setInterval(fetchData, 60_000);
-    loadIntrusionDates();
     loadIntrusions();
   </script>
 </body>
