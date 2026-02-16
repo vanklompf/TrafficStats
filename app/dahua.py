@@ -34,8 +34,8 @@ class DahuaListener:
         self,
         host: str,
         port: int = 80,
-        user: str = "admin",
-        password: str = "admin",
+        user: str,
+        password: str,
         events: str = "CrossLineDetection",
         protocol: str = "http",
         ivs_names: str = "",
@@ -192,6 +192,18 @@ class DahuaListener:
         )
 
 
+def _parse_int_env(name: str, default: int) -> int:
+    """Parse an integer environment variable, falling back to *default*."""
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r, using default %d", name, raw, default)
+        return default
+
+
 def create_listener_from_env() -> DahuaListener | None:
     """Build a DahuaListener from environment variables."""
     host = os.environ.get("DAHUA_HOST", "")
@@ -199,11 +211,17 @@ def create_listener_from_env() -> DahuaListener | None:
         logger.warning("DAHUA_HOST not set -- listener will not start")
         return None
 
+    user = os.environ.get("DAHUA_USER", "")
+    password = os.environ.get("DAHUA_PASS", "")
+    if not user or not password:
+        logger.error("DAHUA_USER and DAHUA_PASS must be set -- listener will not start")
+        return None
+
     return DahuaListener(
         host=host,
-        port=int(os.environ.get("DAHUA_PORT", "80")),
-        user=os.environ.get("DAHUA_USER", "admin"),
-        password=os.environ.get("DAHUA_PASS", "admin"),
+        port=_parse_int_env("DAHUA_PORT", 80),
+        user=user,
+        password=password,
         events=os.environ.get("DAHUA_EVENTS", "All"),
         protocol=os.environ.get("DAHUA_PROTOCOL", "http"),
         ivs_names=os.environ.get("DAHUA_IVS_NAMES", "CarDetection"),

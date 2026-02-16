@@ -20,9 +20,7 @@
 
 8. **CI workflow issues (`docker-publish.yml`)** — Tag trigger `'*'` is too broad (tighten to `'v*'`); no test step before push; no build cache; `build-push-action` at v5 (latest is v6).
 
-9. **XSS risk in `events.html`** — (File removed, but if re-added: use `textContent` / DOM APIs instead of `innerHTML` with template literals.)
-
-10. **Hardcoded default credentials in `DahuaListener`** — Constructor defaults to `user="admin"`, `password="admin"`. Consider requiring these with no default.
+10. ~~**Hardcoded default credentials in `DahuaListener`**~~ — Resolved: removed default credentials; `user` and `password` are now required, and `create_listener_from_env` refuses to start if `DAHUA_USER`/`DAHUA_PASS` are unset.
 
 11. **No path-containment check for media files** — `_validate_filename` regex prevents most traversal, but no `Path.resolve()` check confirms the final path is under `MEDIA_PATH`. Add a containment check.
 
@@ -40,7 +38,7 @@
 
 17. **Logging configuration at import time** — `logging.basicConfig()` runs at module import; move to the lifespan handler.
 
-18. **Environment variable parsing can crash** — `DAHUA_PORT` uses `int()` and `VIDEO_CACHE_MAX_GB` uses `float()` without try/except.
+18. ~~**Environment variable parsing can crash**~~ — Resolved: added `_parse_int_env` / `_parse_float_env` helpers that log a warning and fall back to the default on invalid input.
 
 19. **`.gitignore`: `data-test/*` should be `data-test/`** — Consistent with `data/` pattern.
 

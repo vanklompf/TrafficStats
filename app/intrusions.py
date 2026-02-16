@@ -19,8 +19,20 @@ logger = logging.getLogger(__name__)
 
 MEDIA_PATH = os.environ.get("INTRUSION_MEDIA_PATH", "/media")
 VIDEO_CACHE_DIR = os.environ.get("VIDEO_CACHE_DIR", "/data/video_cache")
-VIDEO_CACHE_MAX_BYTES = (
-    float(os.environ.get("VIDEO_CACHE_MAX_GB", "20")) * 1024 * 1024 * 1024
+def _parse_float_env(name: str, default: float) -> float:
+    """Parse a float environment variable, falling back to *default*."""
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid number for %s=%r, using default %s", name, raw, default)
+        return default
+
+
+VIDEO_CACHE_MAX_BYTES = int(
+    _parse_float_env("VIDEO_CACHE_MAX_GB", 20.0) * 1024 * 1024 * 1024
 )
 
 # Max timestamp distance (seconds) to consider a file a match for an event
