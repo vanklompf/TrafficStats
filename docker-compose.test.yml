@@ -9,5 +9,8 @@ services:
     volumes:
       - ./data-test:/data
       - /mnt/nas/media/backup/kamery/kamera_front:/media/kamera_front:ro
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
     env_file:
       - .env

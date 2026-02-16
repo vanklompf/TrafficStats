@@ -8,5 +8,8 @@ services:
     volumes:
       - ./data:/data
       - ${MEDIA_HOST_PATH:?MEDIA_HOST_PATH must be set}:/media/kamera_front:ro
+    environment:
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
     env_file:
       - .env
