@@ -12,7 +12,7 @@
 
 5. **Hardcoded NAS path in docker-compose** — `/mnt/nas/media/backup/kamery/kamera_front` is machine-specific. Parameterize via an env var.
 
-6. **CI workflow issues (`docker-publish.yml`)** — No test step before push; `build-push-action` at v5 (latest is v6).
+6. **CI workflow issues (`docker-publish.yml`)** — No test step before push; ~~`build-push-action` at v5 (latest is v6)~~.
 
 7. **No path-containment check for media files** — `_validate_filename` regex prevents most traversal, but no `Path.resolve()` check confirms the final path is under `MEDIA_PATH`. Add a containment check.
 
