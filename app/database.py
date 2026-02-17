@@ -6,7 +6,7 @@ import os
 import logging
 from datetime import datetime, timedelta, timezone
 
-from app.sun import get_no_collection_ranges, is_daytime
+from app.sun import get_no_collection_ranges, get_sun_times, is_daytime
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +99,14 @@ def insert_event(
     )
 
 
-def get_stats(range_key: str) -> dict:
+def get_stats(range_key: str, date_str: str | None = None) -> dict:
     """
     Return event counts aggregated into 5-minute buckets, split by direction.
 
-    range_key: '24h' or 'week'
+    range_key: 'day' or 'week'
+    date_str:  'YYYY-MM-DD' reference date (defaults to today UTC).
+               For 'day' — that calendar day.
+               For 'week' — seven days ending on (and including) that date.
     Returns: {
         'buckets': [{'time': '...', 'count': N, 'left_to_right': N, 'right_to_left': N}, ...],
         'total': N,
@@ -115,16 +118,25 @@ def get_stats(range_key: str) -> dict:
         'peak_1h': N,
         'peak_1h_time': str or None,
         'no_collection_ranges': [{'start': str, 'end': str}, ...],
+        'sun_times': {'sunrise': str, 'sunset': str} or None,
     }
     """
     conn = _get_conn()
 
+    if date_str is None:
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    target = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
     if range_key == "week":
-        since = datetime.now(timezone.utc) - timedelta(days=7)
+        since = target - timedelta(days=6)
+        until = target + timedelta(days=1)
     else:
-        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        since = target
+        until = target + timedelta(days=1)
 
     since_str = since.strftime("%Y-%m-%d %H:%M:%S")
+    until_str = until.strftime("%Y-%m-%d %H:%M:%S")
 
     # Group into 5-minute buckets with per-direction counts
     rows = conn.execute(
@@ -137,11 +149,11 @@ def get_stats(range_key: str) -> dict:
             SUM(CASE WHEN direction = 'LeftToRight' THEN 1 ELSE 0 END) AS left_to_right,
             SUM(CASE WHEN direction = 'RightToLeft' THEN 1 ELSE 0 END) AS right_to_left
         FROM events
-        WHERE timestamp >= ? AND event_type = 'traffic'
+        WHERE timestamp >= ? AND timestamp < ? AND event_type = 'traffic'
         GROUP BY bucket
         ORDER BY bucket
         """,
-        (since_str,),
+        (since_str, until_str),
     ).fetchall()
 
     buckets = [
@@ -163,11 +175,11 @@ def get_stats(range_key: str) -> dict:
         SELECT strftime('%Y-%m-%d %H:%M', timestamp) AS minute,
                COUNT(*) AS cnt
         FROM events
-        WHERE timestamp >= ? AND event_type = 'traffic'
+        WHERE timestamp >= ? AND timestamp < ? AND event_type = 'traffic'
         GROUP BY minute
         ORDER BY minute
         """,
-        (since_str,),
+        (since_str, until_str),
     ).fetchall()
 
     # 1-minute peak (unchanged logic, just reuse the query)
@@ -219,8 +231,13 @@ def get_stats(range_key: str) -> dict:
         peak_1h, peak_1h_time = _sliding_peak(60)
 
     # No-collection bands (sunset to sunrise) for the chart when location is set
-    now_utc = datetime.now(timezone.utc)
-    no_collection_ranges = get_no_collection_ranges(since, now_utc)
+    no_collection_ranges = get_no_collection_ranges(since, until)
+
+    # For day view, also return sunrise/sunset so the frontend can limit the
+    # chart x-axis to the collection window.
+    sun_times = None
+    if range_key == "day":
+        sun_times = get_sun_times(target.date())
 
     return {
         "buckets": buckets,
@@ -234,6 +251,7 @@ def get_stats(range_key: str) -> dict:
         "peak_1h": peak_1h,
         "peak_1h_time": peak_1h_time,
         "no_collection_ranges": no_collection_ranges,
+        "sun_times": sun_times,
     }
 
 

@@ -74,6 +74,29 @@ def is_daytime(utc_dt: datetime) -> bool:
         return True
 
 
+def get_sun_times(for_date: date) -> dict[str, str] | None:
+    """Return sunrise and sunset as UTC strings for a given local date.
+
+    Returns ``{"sunrise": "YYYY-MM-DD HH:MM", "sunset": "YYYY-MM-DD HH:MM"}``
+    or ``None`` if CITY is not configured.
+    """
+    loc = _get_location()
+    if loc is None:
+        return None
+    try:
+        tz = ZoneInfo(loc.timezone)
+        s = sun(loc.observer, date=for_date, tzinfo=tz)
+        sunrise_utc = s["sunrise"].astimezone(timezone.utc)
+        sunset_utc = s["sunset"].astimezone(timezone.utc)
+        return {
+            "sunrise": sunrise_utc.strftime("%Y-%m-%d %H:%M"),
+            "sunset": sunset_utc.strftime("%Y-%m-%d %H:%M"),
+        }
+    except Exception as e:
+        logger.debug("get_sun_times failed for %s: %s", for_date, e)
+        return None
+
+
 def get_no_collection_ranges(
     since_utc: datetime, until_utc: datetime
 ) -> list[dict[str, str]]:

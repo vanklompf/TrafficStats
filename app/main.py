@@ -78,14 +78,21 @@ async def index():
 
 
 @app.get("/api/stats")
-async def api_stats(range: str = Query("24h", pattern="^(24h|week)$")):
+async def api_stats(
+    range: str = Query("day", pattern="^(day|week)$"),
+    date: str = Query(default=""),
+):
     """
     Return traffic event counts in 5-minute buckets.
 
     Query params:
-        range: '24h' (default) or 'week'
+        range: 'day' (default) or 'week'
+        date:  'YYYY-MM-DD' reference date (defaults to today UTC).
     """
-    data = get_stats(range)
+    if not date:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _validate_date(date)
+    data = get_stats(range, date)
     return JSONResponse(content=data)
 
 

@@ -178,6 +178,12 @@
       text-align: center;
     }
 
+    .toolbar-sep {
+      width: 1px;
+      height: 1.5rem;
+      background: var(--border);
+    }
+
     .intrusions-toolbar input[type="date"] {
       padding: .45rem .75rem;
       border: 1px solid var(--border);
@@ -364,9 +370,14 @@
 
     <!-- ============ Traffic tab ============ -->
     <div class="tab-content" id="tab-traffic">
-      <div class="controls" style="margin-bottom:1rem;">
-        <button class="btn active" data-range="24h">Last 24 Hours</button>
-        <button class="btn" data-range="week">Last Week</button>
+      <div class="intrusions-toolbar">
+        <button class="btn active" data-traffic-range="day">Day</button>
+        <button class="btn" data-traffic-range="week">Week</button>
+        <span class="toolbar-sep"></span>
+        <button class="btn date-nav-btn" id="traffic-date-prev" title="Previous">&larr;</button>
+        <input type="date" id="traffic-date" />
+        <button class="btn date-nav-btn" id="traffic-date-next" title="Next">&rarr;</button>
+        <span class="weekday-label" id="traffic-date-label"></span>
       </div>
 
       <div class="cards">
@@ -441,10 +452,10 @@
     // -----------------------------------------------------------------------
     // State
     // -----------------------------------------------------------------------
-    let currentRange = '24h';
+    let trafficRange = 'day';
+    let trafficDate = new Date().toISOString().slice(0, 10);
     let chart = null;
     let currentTab = 'intrusions';
-    let intrusionRefreshTimer = null;
 
     // -----------------------------------------------------------------------
     // Tab switching
@@ -459,6 +470,8 @@
         currentTab = tab;
         if (tab === 'intrusions') {
           loadIntrusions();
+        } else if (tab === 'traffic') {
+          fetchData();
         }
       });
     });
@@ -559,11 +572,66 @@
     }
 
     // -----------------------------------------------------------------------
+    // Traffic date controls
+    // -----------------------------------------------------------------------
+    const trafficDateInput = document.getElementById('traffic-date');
+    const trafficDateLabel = document.getElementById('traffic-date-label');
+
+    trafficDateInput.value = trafficDate;
+    updateTrafficDateLabel();
+
+    function updateTrafficDateLabel() {
+      const d = new Date(trafficDateInput.value + 'T00:00:00');
+      if (trafficRange === 'week') {
+        const start = new Date(d);
+        start.setDate(start.getDate() - 6);
+        const opts = { month: 'short', day: 'numeric' };
+        trafficDateLabel.textContent =
+          start.toLocaleDateString(undefined, opts) + ' \u2013 ' +
+          d.toLocaleDateString(undefined, opts);
+      } else {
+        trafficDateLabel.textContent = d.toLocaleDateString(undefined, { weekday: 'long' });
+      }
+    }
+
+    document.querySelectorAll('[data-traffic-range]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelector('[data-traffic-range].active').classList.remove('active');
+        btn.classList.add('active');
+        trafficRange = btn.dataset.trafficRange;
+        updateTrafficDateLabel();
+        fetchData();
+      });
+    });
+
+    function shiftTrafficDate(delta) {
+      const d = new Date(trafficDateInput.value + 'T00:00:00');
+      d.setDate(d.getDate() + delta);
+      trafficDateInput.value = d.toISOString().slice(0, 10);
+      trafficDate = trafficDateInput.value;
+      updateTrafficDateLabel();
+      fetchData();
+    }
+
+    document.getElementById('traffic-date-prev').addEventListener('click', () => {
+      shiftTrafficDate(trafficRange === 'week' ? -7 : -1);
+    });
+    document.getElementById('traffic-date-next').addEventListener('click', () => {
+      shiftTrafficDate(trafficRange === 'week' ? 7 : 1);
+    });
+
+    trafficDateInput.addEventListener('change', () => {
+      trafficDate = trafficDateInput.value;
+      updateTrafficDateLabel();
+      fetchData();
+    });
+
+    // -----------------------------------------------------------------------
     // Traffic data fetching
     // -----------------------------------------------------------------------
     async function fetchData() {
       try {
-        const resp = await fetch(`/api/stats?range=${currentRange}`);
+        const resp = await fetch(`/api/stats?range=${trafficRange}&date=${trafficDate}`);
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const json = await resp.json();
         updateUI(json);
@@ -577,12 +645,12 @@
       const isHour = /^\d{4}-\d{2}-\d{2} \d{2}$/.test(timeStr);
       const iso = timeStr.replace(' ', 'T') + (isHour ? ':00:00' : ':00') + 'Z';
       const date = new Date(iso);
-      return currentRange === 'week'
+      return trafficRange === 'week'
         ? date.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
         : date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
     }
 
-    function updateUI({ buckets, total, total_left_to_right, total_right_to_left, peak_1min, peak_1min_time, peak_5min, peak_5min_time, peak_1h, peak_1h_time, no_collection_ranges = [] }) {
+    function updateUI({ buckets, total, total_left_to_right, total_right_to_left, peak_1min, peak_1min_time, peak_5min, peak_5min_time, peak_1h, peak_1h_time, no_collection_ranges = [], sun_times = null }) {
       document.getElementById('total').textContent = total.toLocaleString();
       document.getElementById('total-ltr').textContent = total_left_to_right.toLocaleString();
       document.getElementById('total-rtl').textContent = total_right_to_left.toLocaleString();
@@ -603,6 +671,26 @@
       chart.data.datasets[1].data = buckets.map(b => b.left_to_right);
       chart.data.datasets[2].data = buckets.map(b => b.right_to_left);
 
+      // X-axis bounds
+      if (trafficRange === 'day') {
+        if (sun_times) {
+          chart.options.scales.x.min = new Date(sun_times.sunrise.replace(' ', 'T') + ':00Z').getTime();
+          chart.options.scales.x.max = new Date(sun_times.sunset.replace(' ', 'T') + ':00Z').getTime();
+        } else {
+          chart.options.scales.x.min = new Date(trafficDate + 'T00:00:00Z').getTime();
+          chart.options.scales.x.max = new Date(trafficDate + 'T23:59:59Z').getTime();
+        }
+        chart.options.scales.x.time.unit = 'hour';
+      } else {
+        const endDate = new Date(trafficDate + 'T00:00:00Z');
+        const startDate = new Date(endDate);
+        startDate.setUTCDate(startDate.getUTCDate() - 6);
+        chart.options.scales.x.min = startDate.getTime();
+        chart.options.scales.x.max = endDate.getTime() + 86400000 - 1;
+        chart.options.scales.x.time.unit = 'day';
+      }
+
+      // No-collection band annotations
       const annotations = {};
       no_collection_ranges.forEach((r, i) => {
         const xMin = new Date(r.start.replace(' ', 'T') + ':00Z').getTime();
@@ -618,27 +706,9 @@
       });
       chart.options.plugins.annotation.annotations = annotations;
 
-      if (currentRange === 'week') {
-        chart.options.scales.x.time.unit = 'day';
-      } else {
-        chart.options.scales.x.time.unit = 'hour';
-      }
-
       chart.update('none');
       document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
     }
-
-    // -----------------------------------------------------------------------
-    // Traffic controls
-    // -----------------------------------------------------------------------
-    document.querySelectorAll('.btn[data-range]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelector('.btn.active').classList.remove('active');
-        btn.classList.add('active');
-        currentRange = btn.dataset.range;
-        fetchData();
-      });
-    });
 
     // -----------------------------------------------------------------------
     // Intrusions
@@ -809,7 +879,9 @@
     // -----------------------------------------------------------------------
     initChart();
     fetchData();
-    setInterval(fetchData, 60_000);
+    setInterval(() => {
+      if (currentTab === 'traffic') fetchData();
+    }, 60_000);
     loadIntrusions();
   </script>
 </body>
