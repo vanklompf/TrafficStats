@@ -188,6 +188,12 @@
       color-scheme: dark;
     }
 
+    .weekday-label {
+      font-size: .875rem;
+      color: var(--text-dim);
+      font-weight: 500;
+    }
+
     .intrusions-count {
       font-size: .875rem;
       color: var(--text-dim);
@@ -412,6 +418,7 @@
         <button class="btn date-nav-btn" id="date-prev" title="Previous day">&larr;</button>
         <input type="date" id="intrusion-date" />
         <button class="btn date-nav-btn" id="date-next" title="Next day">&rarr;</button>
+        <span class="weekday-label" id="weekday-label"></span>
         <span class="intrusions-count" id="intrusion-count"></span>
       </div>
       <div id="events-grid" class="events-grid"></div>
@@ -639,11 +646,19 @@
     const dateInput = document.getElementById('intrusion-date');
     const eventsGrid = document.getElementById('events-grid');
     const countEl = document.getElementById('intrusion-count');
+    const weekdayLabel = document.getElementById('weekday-label');
+
+    function updateWeekdayLabel() {
+      const d = new Date(dateInput.value + 'T00:00:00');
+      weekdayLabel.textContent = d.toLocaleDateString(undefined, { weekday: 'long' });
+    }
 
     // Default to today UTC
     dateInput.value = new Date().toISOString().slice(0, 10);
+    updateWeekdayLabel();
 
     dateInput.addEventListener('change', () => {
+      updateWeekdayLabel();
       loadIntrusions();
     });
 
@@ -651,6 +666,7 @@
       const d = new Date(dateInput.value + 'T00:00:00');
       d.setDate(d.getDate() + days);
       dateInput.value = d.toISOString().slice(0, 10);
+      updateWeekdayLabel();
       loadIntrusions();
     }
 
