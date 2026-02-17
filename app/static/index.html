@@ -686,7 +686,7 @@
           if (hasSnapshot) {
             const img = document.createElement('img');
             img.className = 'thumb';
-            img.src = ev.snapshot_url;
+            img.src = ev.thumbnail_url || ev.snapshot_url;
             img.alt = 'Snapshot ' + ev.timestamp;
             img.loading = 'lazy';
             tile.appendChild(img);

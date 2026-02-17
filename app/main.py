@@ -23,6 +23,7 @@ from app.intrusions import (
     match_media_for_events,
     convert_dav_to_mp4,
     get_cached_video_path,
+    get_or_create_thumbnail,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,8 +145,10 @@ async def api_intrusions(date: str = Query(default="")):
         vid_date = ev.get("video_date") or date
         if ev["snapshot"]:
             ev["snapshot_url"] = f"/media/snapshot/{snap_date}/{ev['snapshot']}"
+            ev["thumbnail_url"] = f"/media/thumbnail/{snap_date}/{ev['snapshot']}"
         else:
             ev["snapshot_url"] = None
+            ev["thumbnail_url"] = None
         if ev["video"]:
             ev["video_url"] = f"/media/video/{vid_date}/{ev['video']}"
         else:
@@ -163,6 +166,21 @@ async def media_snapshot(date_str: str, filename: str):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Snapshot not found")
     return FileResponse(str(path), media_type="image/jpeg")
+
+
+@app.get("/media/thumbnail/{date_str}/{filename}")
+async def media_thumbnail(date_str: str, filename: str):
+    """Serve a cached, downscaled thumbnail for a snapshot."""
+    date_str = _validate_date(date_str)
+    filename = _validate_filename(filename)
+    thumb = get_or_create_thumbnail(date_str, filename)
+    if thumb is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(
+        str(thumb),
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
 
 
 @app.get("/media/video/{date_str}/{filename}")

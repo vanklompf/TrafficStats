@@ -3,7 +3,8 @@ Intrusion event media matching and video conversion.
 
 Scans the camera FTP upload directory for JPG snapshots and DAV recordings,
 matches them to intrusion events by timestamp proximity, and provides
-ffmpeg-based DAV-to-MP4 conversion with an LRU disk cache.
+ffmpeg-based DAV-to-MP4 conversion with an LRU disk cache.  Also generates
+and caches downscaled snapshot thumbnails for faster grid loading.
 """
 
 import logging
@@ -15,10 +16,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from PIL import Image
+
 logger = logging.getLogger(__name__)
 
 MEDIA_PATH = os.environ.get("INTRUSION_MEDIA_PATH", "/media")
 VIDEO_CACHE_DIR = os.environ.get("VIDEO_CACHE_DIR", "/data/video_cache")
+THUMB_CACHE_DIR = os.environ.get("THUMB_CACHE_DIR", "/data/thumb_cache")
 def _parse_float_env(name: str, default: float) -> float:
     """Parse a float environment variable, falling back to *default*."""
     raw = os.environ.get(name, "")
@@ -37,6 +41,10 @@ VIDEO_CACHE_MAX_BYTES = int(
 
 # Max timestamp distance (seconds) to consider a file a match for an event
 MATCH_THRESHOLD_SECS = 30
+
+# Thumbnail settings: max width in pixels and JPEG quality (1-95)
+THUMB_MAX_WIDTH = int(os.environ.get("THUMB_MAX_WIDTH", "480"))
+THUMB_QUALITY = int(os.environ.get("THUMB_QUALITY", "80"))
 
 # ---------------------------------------------------------------------------
 # Camera timezone handling
@@ -328,3 +336,72 @@ def _enforce_cache_limit():
                 logger.info("Cache evict: %s (%.1f MB freed)", oldest, size / 1024 / 1024)
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Snapshot thumbnail cache
+# ---------------------------------------------------------------------------
+
+
+def _ensure_thumb_dir(date_str: str) -> Path:
+    p = Path(THUMB_CACHE_DIR) / date_str
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def get_or_create_thumbnail(date_str: str, filename: str) -> Path | None:
+    """
+    Return the path to a cached thumbnail for the given snapshot.
+
+    On first call, generates a downscaled JPEG thumbnail and caches it.
+    Uses a per-file lock so concurrent requests for the same image wait
+    for the first resize instead of spawning duplicate work.
+    """
+    thumb_dir = _ensure_thumb_dir(date_str)
+    thumb_path = thumb_dir / filename
+
+    # Fast path: already cached
+    if thumb_path.is_file():
+        return thumb_path
+
+    source = Path(MEDIA_PATH) / date_str / filename
+    if not source.is_file():
+        return None
+
+    lock = _get_conversion_lock(f"thumb/{date_str}/{filename}")
+    with lock:
+        # Re-check under lock
+        if thumb_path.is_file():
+            return thumb_path
+
+        try:
+            with Image.open(source) as img:
+                w, h = img.size
+                if w <= THUMB_MAX_WIDTH:
+                    # Source is already small enough; just copy with
+                    # recompression to save bytes.
+                    new_w, new_h = w, h
+                else:
+                    ratio = THUMB_MAX_WIDTH / w
+                    new_w = THUMB_MAX_WIDTH
+                    new_h = int(h * ratio)
+
+                thumb = img.resize((new_w, new_h), Image.LANCZOS)
+                # Convert to RGB in case of RGBA/palette images
+                if thumb.mode not in ("RGB", "L"):
+                    thumb = thumb.convert("RGB")
+
+                tmp_path = thumb_path.with_suffix(".tmp.jpg")
+                thumb.save(tmp_path, "JPEG", quality=THUMB_QUALITY, optimize=True)
+                tmp_path.rename(thumb_path)
+
+            logger.info(
+                "Thumbnail created: %s (%dx%d -> %dx%d, %.1f KB)",
+                thumb_path, w, h, new_w, new_h,
+                thumb_path.stat().st_size / 1024,
+            )
+            return thumb_path
+        except Exception:
+            logger.exception("Failed to create thumbnail for %s/%s", date_str, filename)
+            thumb_path.with_suffix(".tmp.jpg").unlink(missing_ok=True)
+            return None
