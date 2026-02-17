@@ -244,6 +244,18 @@
       font-size: .8rem;
     }
 
+    .badge-cached {
+      background: rgba(52, 211, 153, .15);
+      color: #34d399;
+      display: inline-flex;
+      align-items: center;
+      gap: .2rem;
+    }
+    .badge-cached svg {
+      width: .6rem;
+      height: .6rem;
+    }
+
     .event-tile .meta {
       padding: .75rem 1rem;
       display: flex;
@@ -799,6 +811,13 @@
             b.className = 'badge badge-video';
             b.textContent = 'Video';
             badges.appendChild(b);
+            if (ev.video_cached) {
+              const cb = document.createElement('span');
+              cb.className = 'badge badge-cached';
+              cb.title = 'Video cached – instant playback';
+              cb.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Cached';
+              badges.appendChild(cb);
+            }
           } else {
             const b = document.createElement('span');
             b.className = 'badge badge-no-video';

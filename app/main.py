@@ -23,6 +23,7 @@ from app.intrusions import (
     match_media_for_events,
     convert_dav_to_mp4,
     get_cached_video_path,
+    is_video_cached,
     get_or_create_thumbnail,
 )
 
@@ -158,8 +159,10 @@ async def api_intrusions(date: str = Query(default="")):
             ev["thumbnail_url"] = None
         if ev["video"]:
             ev["video_url"] = f"/media/video/{vid_date}/{ev['video']}"
+            ev["video_cached"] = is_video_cached(vid_date, ev["video"])
         else:
             ev["video_url"] = None
+            ev["video_cached"] = False
 
     return JSONResponse(content={"date": date, "events": enriched})
 

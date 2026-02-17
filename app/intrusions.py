@@ -207,29 +207,23 @@ def match_media_for_events(
                 best_jpg = fname
                 best_jpg_date = ds
 
-        # Find DAV whose range contains the event, or closest by midpoint
+        # Find DAV whose range contains the event (with a small tolerance
+        # to account for minor clock drift between event and file timestamps).
         best_dav = None
         best_dav_date = None
-        best_dav_dist = MATCH_THRESHOLD_SECS + 1
+        tolerance = timedelta(seconds=MATCH_THRESHOLD_SECS)
         for fname, start, end, ds in davs:
-            if start <= ev_ts <= end:
+            if (start - tolerance) <= ev_ts <= (end + tolerance):
                 best_dav = fname
                 best_dav_date = ds
-                best_dav_dist = 0
                 break
-            mid = start + (end - start) / 2
-            dist = abs((mid - ev_ts).total_seconds())
-            if dist < best_dav_dist:
-                best_dav_dist = dist
-                best_dav = fname
-                best_dav_date = ds
 
         results.append({
             **ev,
             "snapshot": best_jpg if best_jpg_dist <= MATCH_THRESHOLD_SECS else None,
             "snapshot_date": best_jpg_date if best_jpg_dist <= MATCH_THRESHOLD_SECS else None,
-            "video": best_dav if best_dav_dist <= MATCH_THRESHOLD_SECS else None,
-            "video_date": best_dav_date if best_dav_dist <= MATCH_THRESHOLD_SECS else None,
+            "video": best_dav,
+            "video_date": best_dav_date,
         })
 
     return results
@@ -244,6 +238,12 @@ def _ensure_cache_dir(date_str: str) -> Path:
     p = Path(VIDEO_CACHE_DIR) / date_str
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def is_video_cached(date_str: str, dav_filename: str) -> bool:
+    """Check whether a cached MP4 exists (without updating mtime)."""
+    mp4_name = Path(dav_filename).stem + ".mp4"
+    return (Path(VIDEO_CACHE_DIR) / date_str / mp4_name).is_file()
 
 
 def get_cached_video_path(date_str: str, dav_filename: str) -> Path | None:
