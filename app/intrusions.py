@@ -39,6 +39,15 @@ VIDEO_CACHE_MAX_BYTES = int(
     _parse_float_env("VIDEO_CACHE_MAX_GB", 20.0) * 1024 * 1024 * 1024
 )
 
+# Target video height for re-encoding (0 = no scaling).  Width is computed
+# automatically to preserve the aspect ratio (-2 keeps it divisible by 2).
+VIDEO_SCALE_HEIGHT = int(os.environ.get("VIDEO_SCALE_HEIGHT", "720"))
+
+# Maximum time (seconds) for a single ffmpeg conversion.  4K HEVC → 720p
+# H.264 software transcode runs at ~0.23× real-time, so a 2-minute clip
+# needs ~520 s.  Default 600 s gives comfortable headroom.
+VIDEO_FFMPEG_TIMEOUT = int(os.environ.get("VIDEO_FFMPEG_TIMEOUT", "600"))
+
 # Max timestamp distance (seconds) to consider a file a match for an event
 MATCH_THRESHOLD_SECS = 30
 
@@ -286,9 +295,14 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
 
         cmd = [
             "ffmpeg", "-y", "-i", str(source),
-            "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1",
+        ]
+        if VIDEO_SCALE_HEIGHT > 0:
+            cmd += ["-vf", f"scale=-2:{VIDEO_SCALE_HEIGHT}"]
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
             "-pix_fmt", "yuv420p",
-            "-b:v", "1500k", "-maxrate", "2000k", "-bufsize", "3000k",
             "-c:a", "aac", "-b:a", "128k", "-ac", "2",
             "-movflags", "+faststart",
             str(tmp_output),
@@ -300,16 +314,18 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
                 cmd,
                 check=True,
                 capture_output=True,
-                timeout=120,
+                timeout=VIDEO_FFMPEG_TIMEOUT,
             )
             tmp_output.rename(output)
-            logger.info("Conversion complete: %s (%.1f KB)", output, output.stat().st_size / 1024)
+            size_kb = output.stat().st_size / 1024
+            logger.info("Conversion complete: %s (%.1f KB)", output, size_kb)
         except subprocess.CalledProcessError as e:
-            logger.error("ffmpeg failed for %s: %s", source, e.stderr[-500:] if e.stderr else "")
+            stderr_tail = e.stderr[-1000:] if e.stderr else b""
+            logger.error("ffmpeg failed for %s (exit %s): %s", source, e.returncode, stderr_tail)
             tmp_output.unlink(missing_ok=True)
             return None
         except subprocess.TimeoutExpired:
-            logger.error("ffmpeg timed out for %s", source)
+            logger.error("ffmpeg timed out for %s (timeout=%ds)", source, VIDEO_FFMPEG_TIMEOUT)
             tmp_output.unlink(missing_ok=True)
             return None
 
