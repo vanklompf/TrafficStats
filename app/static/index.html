@@ -76,6 +76,11 @@
       color: #fff;
       box-shadow: 0 0 12px var(--accent-glow);
     }
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
 
     /* --- Tab navigation --- */
     .tabs {
@@ -729,44 +734,97 @@
     const eventsGrid = document.getElementById('events-grid');
     const countEl = document.getElementById('intrusion-count');
     const weekdayLabel = document.getElementById('weekday-label');
+    const datePrevBtn = document.getElementById('date-prev');
+    const dateNextBtn = document.getElementById('date-next');
+    let intrusionDates = []; // dates with events, newest first (from API)
+
+    function todayStr() {
+      return new Date().toISOString().slice(0, 10);
+    }
 
     function updateWeekdayLabel() {
       const d = new Date(dateInput.value + 'T00:00:00');
       weekdayLabel.textContent = d.toLocaleDateString(undefined, { weekday: 'long' });
     }
 
-    // Default to today UTC
-    dateInput.value = new Date().toISOString().slice(0, 10);
+    function clampToToday() {
+      if (dateInput.value > todayStr()) {
+        dateInput.value = todayStr();
+        updateWeekdayLabel();
+      }
+    }
+
+    function updateDateNavButtons() {
+      const current = dateInput.value;
+      const today = todayStr();
+      // Prev: can go if there is an older date with events
+      const prevIdx = intrusionDates.findIndex(d => d < current);
+      datePrevBtn.disabled = prevIdx < 0;
+      // Next: can go if there is a newer date with events and it's not in the future
+      const nextDate = intrusionDates.find(d => d > current && d <= today);
+      dateNextBtn.disabled = !nextDate;
+    }
+
+    // Default to today UTC; cap input to today
+    dateInput.value = todayStr();
+    dateInput.setAttribute('max', todayStr());
     updateWeekdayLabel();
 
     dateInput.addEventListener('change', () => {
+      clampToToday();
+      dateInput.setAttribute('max', todayStr());
       updateWeekdayLabel();
       loadIntrusions();
     });
 
-    function shiftDate(days) {
-      const d = new Date(dateInput.value + 'T00:00:00');
-      d.setDate(d.getDate() + days);
-      dateInput.value = d.toISOString().slice(0, 10);
-      updateWeekdayLabel();
-      loadIntrusions();
+    function shiftDatePrev() {
+      const current = dateInput.value;
+      const idx = intrusionDates.findIndex(d => d < current);
+      if (idx >= 0) {
+        dateInput.value = intrusionDates[idx];
+        updateWeekdayLabel();
+        loadIntrusions();
+      }
     }
 
-    document.getElementById('date-prev').addEventListener('click', () => shiftDate(-1));
-    document.getElementById('date-next').addEventListener('click', () => shiftDate(1));
+    function shiftDateNext() {
+      const current = dateInput.value;
+      const today = todayStr();
+      const nextDate = intrusionDates.find(d => d > current && d <= today);
+      if (nextDate) {
+        dateInput.value = nextDate;
+        updateWeekdayLabel();
+        loadIntrusions();
+      }
+    }
+
+    datePrevBtn.addEventListener('click', shiftDatePrev);
+    dateNextBtn.addEventListener('click', shiftDateNext);
 
     async function loadIntrusions() {
-      const dateStr = dateInput.value;
+      let dateStr = dateInput.value;
       if (!dateStr) return;
+
+      dateInput.setAttribute('max', todayStr());
+      clampToToday();
+      dateStr = dateInput.value;
 
       eventsGrid.innerHTML = '<div class="empty-state">Loading...</div>';
 
       try {
-        const resp = await fetch(`/api/intrusions?date=${dateStr}`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const { events } = await resp.json();
+        const [datesResp, eventsResp] = await Promise.all([
+          fetch('/api/intrusions/dates'),
+          fetch(`/api/intrusions?date=${dateStr}`)
+        ]);
+        if (datesResp.ok) {
+          const { dates } = await datesResp.json();
+          intrusionDates = dates || [];
+        }
+        if (!eventsResp.ok) throw new Error(`HTTP ${eventsResp.status}`);
+        const { events } = await eventsResp.json();
 
         countEl.textContent = `${events.length} event${events.length !== 1 ? 's' : ''}`;
+        updateDateNavButtons();
 
         if (events.length === 0) {
           eventsGrid.innerHTML = '<div class="empty-state">No intrusion events on this date</div>';
