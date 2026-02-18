@@ -69,6 +69,9 @@ def init_db():
     logger.info("Database initialised at %s", DB_PATH)
 
 
+INTRUSION_DEBOUNCE_SECS = 10
+
+
 def insert_event(
     camera: str = "",
     direction: str = "",
@@ -79,7 +82,8 @@ def insert_event(
 
     For traffic events, only inserts when the current time is between sunrise
     and sunset at the configured location (CITY). Intrusion events are always
-    recorded regardless of time of day.
+    recorded regardless of time of day but are debounced so that events closer
+    than INTRUSION_DEBOUNCE_SECS apart are dropped.
     """
     now_utc = datetime.now(timezone.utc)
     if event_type == "traffic" and not is_daytime(now_utc):
@@ -87,6 +91,23 @@ def insert_event(
         return
     conn = _get_conn()
     now = now_utc.strftime("%Y-%m-%d %H:%M:%S")
+
+    if event_type == "intrusion":
+        cutoff = (now_utc - timedelta(seconds=INTRUSION_DEBOUNCE_SECS)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        row = conn.execute(
+            "SELECT 1 FROM events "
+            "WHERE event_type = 'intrusion' AND timestamp > ? LIMIT 1",
+            (cutoff,),
+        ).fetchone()
+        if row is not None:
+            logger.debug(
+                "Skipping intrusion event — another occurred within %ds",
+                INTRUSION_DEBOUNCE_SECS,
+            )
+            return
+
     conn.execute(
         "INSERT INTO events (timestamp, camera, direction, event_type, ivs_name) "
         "VALUES (?, ?, ?, ?, ?)",
