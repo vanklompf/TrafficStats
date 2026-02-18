@@ -45,8 +45,42 @@ VIDEO_SCALE_HEIGHT = int(os.environ.get("VIDEO_SCALE_HEIGHT", "720"))
 
 # Maximum time (seconds) for a single ffmpeg conversion.  4K HEVC → 720p
 # H.264 software transcode runs at ~0.23× real-time, so a 2-minute clip
-# needs ~520 s.  Default 600 s gives comfortable headroom.
+# needs ~520 s.  With QSV hardware encoding this drops to ~2-5× real-time,
+# but we keep the generous default for the software fallback path.
 VIDEO_FFMPEG_TIMEOUT = int(os.environ.get("VIDEO_FFMPEG_TIMEOUT", "600"))
+
+
+# ---------------------------------------------------------------------------
+# Hardware-accelerated encoding (Intel QSV)
+# ---------------------------------------------------------------------------
+
+def _detect_hw_accel() -> str | None:
+    """Probe for Intel QSV support by encoding a tiny synthetic frame."""
+    setting = os.environ.get("VIDEO_HW_ACCEL", "auto").lower().strip()
+    if setting == "off":
+        logger.info("Hardware encoding disabled by VIDEO_HW_ACCEL=off")
+        return None
+
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-init_hw_device", "qsv=hw",
+                "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+                "-c:v", "h264_qsv", "-f", "null", "-",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+        logger.info("Intel QSV hardware encoding is available")
+        return "qsv"
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        logger.info("Intel QSV not available, using software encoding")
+        return None
+
+
+_hw_accel: str | None = _detect_hw_accel()
 
 # Max timestamp distance (seconds) to consider a file a match for an event
 MATCH_THRESHOLD_SECS = 30
@@ -265,13 +299,46 @@ def get_cached_video_path(date_str: str, dav_filename: str) -> Path | None:
     return None
 
 
+def _build_ffmpeg_cmd(
+    source: Path, tmp_output: Path, *, hw: str | None = None,
+) -> list[str]:
+    """Build the ffmpeg command list for the given acceleration mode."""
+    cmd = ["ffmpeg", "-y", "-i", str(source)]
+
+    if hw == "qsv":
+        if VIDEO_SCALE_HEIGHT > 0:
+            cmd += ["-vf", f"scale=-2:{VIDEO_SCALE_HEIGHT}"]
+        cmd += [
+            "-c:v", "h264_qsv",
+            "-preset", "fast",
+            "-global_quality", "23",
+        ]
+    else:
+        if VIDEO_SCALE_HEIGHT > 0:
+            cmd += ["-vf", f"scale=-2:{VIDEO_SCALE_HEIGHT}"]
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+        ]
+
+    cmd += [
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-movflags", "+faststart",
+        str(tmp_output),
+    ]
+    return cmd
+
+
 def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
     """
     Convert a DAV file to a browser-friendly MP4 using ffmpeg.
 
     Uses a per-file lock so concurrent requests for the same video
     wait for the first conversion instead of spawning duplicate ffmpeg
-    processes.
+    processes.  When Intel QSV is available the hardware encoder is
+    tried first; on failure the conversion is retried with software.
 
     Returns the path to the cached MP4, or None on failure.
     """
@@ -282,8 +349,6 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
 
     lock = _get_conversion_lock(f"{date_str}/{dav_filename}")
     with lock:
-        # Re-check cache under lock; another request may have finished
-        # the conversion while we were waiting.
         cached = get_cached_video_path(date_str, dav_filename)
         if cached is not None:
             return cached
@@ -293,41 +358,58 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
         output = cache_dir / mp4_name
         tmp_output = output.with_suffix(".tmp.mp4")
 
-        cmd = [
-            "ffmpeg", "-y", "-i", str(source),
-        ]
-        if VIDEO_SCALE_HEIGHT > 0:
-            cmd += ["-vf", f"scale=-2:{VIDEO_SCALE_HEIGHT}"]
-        cmd += [
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-            "-movflags", "+faststart",
-            str(tmp_output),
-        ]
+        hw = _hw_accel
+        cmd = _build_ffmpeg_cmd(source, tmp_output, hw=hw)
 
         try:
-            logger.info("Converting %s -> %s", source, output)
+            label = "QSV" if hw else "software"
+            logger.info("Converting %s -> %s (%s)", source, output, label)
             subprocess.run(
                 cmd,
                 check=True,
                 capture_output=True,
                 timeout=VIDEO_FFMPEG_TIMEOUT,
             )
-            tmp_output.rename(output)
-            size_kb = output.stat().st_size / 1024
-            logger.info("Conversion complete: %s (%.1f KB)", output, size_kb)
         except subprocess.CalledProcessError as e:
-            stderr_tail = e.stderr[-1000:] if e.stderr else b""
-            logger.error("ffmpeg failed for %s (exit %s): %s", source, e.returncode, stderr_tail)
             tmp_output.unlink(missing_ok=True)
-            return None
+            if hw is not None:
+                stderr_tail = e.stderr[-1000:] if e.stderr else b""
+                logger.warning(
+                    "QSV encode failed for %s, retrying with software: %s",
+                    source, stderr_tail,
+                )
+                cmd = _build_ffmpeg_cmd(source, tmp_output, hw=None)
+                try:
+                    subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        timeout=VIDEO_FFMPEG_TIMEOUT,
+                    )
+                except subprocess.CalledProcessError as e2:
+                    stderr_tail = e2.stderr[-1000:] if e2.stderr else b""
+                    logger.error(
+                        "Software fallback also failed for %s (exit %s): %s",
+                        source, e2.returncode, stderr_tail,
+                    )
+                    tmp_output.unlink(missing_ok=True)
+                    return None
+                except subprocess.TimeoutExpired:
+                    logger.error("ffmpeg timed out for %s (timeout=%ds)", source, VIDEO_FFMPEG_TIMEOUT)
+                    tmp_output.unlink(missing_ok=True)
+                    return None
+            else:
+                stderr_tail = e.stderr[-1000:] if e.stderr else b""
+                logger.error("ffmpeg failed for %s (exit %s): %s", source, e.returncode, stderr_tail)
+                return None
         except subprocess.TimeoutExpired:
             logger.error("ffmpeg timed out for %s (timeout=%ds)", source, VIDEO_FFMPEG_TIMEOUT)
             tmp_output.unlink(missing_ok=True)
             return None
+
+        tmp_output.rename(output)
+        size_kb = output.stat().st_size / 1024
+        logger.info("Conversion complete: %s (%.1f KB)", output, size_kb)
 
         _enforce_cache_limit()
         return output

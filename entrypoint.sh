@@ -11,4 +11,12 @@ fi
 
 chown appuser:appuser /data
 
+if [ -c /dev/dri/renderD128 ]; then
+    RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+    if ! getent group "$RENDER_GID" > /dev/null 2>&1; then
+        groupadd -g "$RENDER_GID" render_host
+    fi
+    usermod -aG "$RENDER_GID" appuser
+fi
+
 exec gosu appuser "$@"

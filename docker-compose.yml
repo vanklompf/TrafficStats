@@ -9,6 +9,10 @@ services:
     volumes:
       - ${DATA_PATH}:/data
       - ${MEDIA_HOST_PATH}:/media:ro
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "109"
     environment:
       - PUID=${PUID:-1001}
       - PGID=${PGID:-1001}
@@ -18,6 +22,7 @@ services:
       - DAHUA_IVS_NAMES=${DAHUA_IVS_NAMES:-CarDetection}
       - DAHUA_INTRUSION_IVS_NAME=${DAHUA_INTRUSION_IVS_NAME:-Intrusion}
       - VIDEO_CACHE_MAX_GB=${VIDEO_CACHE_MAX_GB:-20}
+      - VIDEO_HW_ACCEL=${VIDEO_HW_ACCEL:-auto}
       - TZ=${TZ:-Europe/Warsaw}
     env_file:
       - .env

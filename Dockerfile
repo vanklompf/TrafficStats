@@ -1,7 +1,13 @@
 FROM python:3.12-slim
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg curl gosu && \
+RUN . /etc/os-release && \
+    for comp in non-free-firmware non-free; do \
+      echo "deb http://deb.debian.org/debian $VERSION_CODENAME $comp" >> /etc/apt/sources.list.d/non-free.list; \
+    done && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg curl gosu \
+        intel-media-va-driver-non-free libmfx-gen1.2 && \
     rm -rf /var/lib/apt/lists/*
 
 RUN addgroup --gid 1000 appuser && \
