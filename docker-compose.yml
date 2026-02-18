@@ -3,13 +3,21 @@ services:
     build: .
     container_name: trafficstats
     restart: unless-stopped
+    mem_limit: 4g
     ports:
       - "3896:8080"
     volumes:
-      - ./data:/data
-      - ${MEDIA_HOST_PATH:?MEDIA_HOST_PATH must be set}:/media/kamera_front:ro
+      - ${DATA_PATH}:/data
+      - ${MEDIA_HOST_PATH}:/media:ro
     environment:
-      - PUID=${PUID:-1000}
-      - PGID=${PGID:-1000}
+      - PUID=${PUID:-1001}
+      - PGID=${PGID:-1001}
+      - CITY=${CITY:-Łańcut}
+      - DAHUA_PORT=${DAHUA_PORT:-80}
+      - DAHUA_EVENTS=${DAHUA_EVENTS:-All}
+      - DAHUA_IVS_NAMES=${DAHUA_IVS_NAMES:-CarDetection}
+      - DAHUA_INTRUSION_IVS_NAME=${DAHUA_INTRUSION_IVS_NAME:-Intrusion}
+      - VIDEO_CACHE_MAX_GB=${VIDEO_CACHE_MAX_GB:-20}
+      - TZ=${TZ:-Europe/Warsaw}
     env_file:
       - .env
