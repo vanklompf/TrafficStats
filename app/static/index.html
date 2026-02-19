@@ -780,6 +780,7 @@
     function shiftDatePrev() {
       const current = dateInput.value;
       const idx = intrusionDates.findIndex(d => d < current);
+
       if (idx >= 0) {
         dateInput.value = intrusionDates[idx];
         updateWeekdayLabel();
@@ -790,7 +791,8 @@
     function shiftDateNext() {
       const current = dateInput.value;
       const today = todayStr();
-      const nextDate = intrusionDates.find(d => d > current && d <= today);
+      const nextDate = intrusionDates.findLast(d => d > current && d <= today);
+
       if (nextDate) {
         dateInput.value = nextDate;
         updateWeekdayLabel();
@@ -819,6 +821,7 @@
         if (datesResp.ok) {
           const { dates } = await datesResp.json();
           intrusionDates = dates || [];
+
         }
         if (!eventsResp.ok) throw new Error(`HTTP ${eventsResp.status}`);
         const { events } = await eventsResp.json();
