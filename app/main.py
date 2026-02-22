@@ -12,8 +12,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.database import init_db, close_conn, get_stats, get_intrusion_events, get_intrusion_dates
@@ -105,6 +106,80 @@ async def health():
         "status": "ok",
         "camera_listener": "running" if camera_connected else "stopped",
     }
+
+
+# ---------------------------------------------------------------------------
+# Live camera view
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/live/mjpeg")
+async def live_mjpeg(
+    subtype: int = Query(default=1, ge=0, le=3),
+):
+    """Proxy the camera's MJPEG stream (sub-stream by default for lower bandwidth)."""
+    if _listener is None:
+        raise HTTPException(status_code=503, detail="Camera not configured")
+
+    url = (
+        f"{_listener.protocol}://{_listener.host}:{_listener.port}"
+        f"/cgi-bin/mjpg/video.cgi?channel=1&subtype={subtype}"
+    )
+
+    client = httpx.AsyncClient(
+        auth=httpx.DigestAuth(_listener.user, _listener.password),
+        timeout=httpx.Timeout(10.0, read=None),
+    )
+    try:
+        req = client.build_request("GET", url)
+        resp = await client.send(req, stream=True)
+        resp.raise_for_status()
+    except Exception as exc:
+        await client.aclose()
+        logger.error("Failed to connect to camera MJPEG stream: %s", exc)
+        raise HTTPException(status_code=502, detail="Cannot connect to camera")
+
+    content_type = resp.headers.get(
+        "content-type", "multipart/x-mixed-replace"
+    )
+
+    async def relay():
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=8192):
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return StreamingResponse(relay(), media_type=content_type)
+
+
+@app.get("/api/live/snapshot")
+async def live_snapshot():
+    """Fetch a single JPEG snapshot from the camera."""
+    if _listener is None:
+        raise HTTPException(status_code=503, detail="Camera not configured")
+
+    url = (
+        f"{_listener.protocol}://{_listener.host}:{_listener.port}"
+        f"/cgi-bin/snapshot.cgi?channel=1"
+    )
+    try:
+        async with httpx.AsyncClient(
+            auth=httpx.DigestAuth(_listener.user, _listener.password),
+            timeout=httpx.Timeout(10.0),
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+    except Exception as exc:
+        logger.error("Failed to fetch camera snapshot: %s", exc)
+        raise HTTPException(status_code=502, detail="Cannot connect to camera")
+
+    return Response(
+        content=resp.content,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ---------------------------------------------------------------------------

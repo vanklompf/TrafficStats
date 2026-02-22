@@ -371,6 +371,77 @@
       text-align: center;
       color: var(--text-dim);
     }
+
+    /* --- Live tab --- */
+    .live-container {
+      max-width: 960px;
+      margin: 0 auto;
+    }
+
+    .live-wrapper {
+      position: relative;
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      aspect-ratio: 16 / 9;
+    }
+
+    .live-wrapper img {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+
+    .live-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-dim);
+      font-size: .95rem;
+      pointer-events: none;
+    }
+    .live-placeholder.hidden { display: none; }
+
+    .live-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: .75rem;
+    }
+
+    .live-status {
+      display: flex;
+      align-items: center;
+      gap: .45rem;
+      font-size: .8rem;
+      color: var(--text-dim);
+    }
+
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      flex-shrink: 0;
+      transition: background .2s;
+    }
+    .live-dot.connected {
+      background: #34d399;
+      box-shadow: 0 0 6px rgba(52, 211, 153, .5);
+    }
+
+    .live-wrapper:fullscreen {
+      border-radius: 0;
+      border: none;
+      background: #000;
+    }
+    .live-wrapper:fullscreen img {
+      object-fit: contain;
+    }
   </style>
 </head>
 <body>
@@ -383,6 +454,7 @@
     <div class="tabs">
       <button class="tab-btn active" data-tab="intrusions">Intrusions</button>
       <button class="tab-btn" data-tab="traffic">Traffic</button>
+      <button class="tab-btn" data-tab="live">Live</button>
     </div>
 
     <!-- ============ Traffic tab ============ -->
@@ -451,6 +523,23 @@
       </div>
       <div id="events-grid" class="events-grid"></div>
     </div>
+
+    <!-- ============ Live tab ============ -->
+    <div class="tab-content" id="tab-live">
+      <div class="live-container">
+        <div class="live-wrapper" id="live-wrapper">
+          <img id="live-stream" />
+          <div class="live-placeholder" id="live-placeholder">Connecting&hellip;</div>
+        </div>
+        <div class="live-toolbar">
+          <div class="live-status">
+            <span class="live-dot" id="live-dot"></span>
+            <span id="live-status-text">Disconnected</span>
+          </div>
+          <button class="btn" id="live-fullscreen" title="Toggle fullscreen">Fullscreen</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Video / snapshot modal -->
@@ -484,11 +573,14 @@
         document.querySelector('.tab-content.active').classList.remove('active');
         const tab = btn.dataset.tab;
         document.getElementById('tab-' + tab).classList.add('active');
+        if (currentTab === 'live' && tab !== 'live') stopLiveStream();
         currentTab = tab;
         if (tab === 'intrusions') {
           loadIntrusions();
         } else if (tab === 'traffic') {
           fetchData();
+        } else if (tab === 'live') {
+          startLiveStream();
         }
       });
     });
@@ -952,6 +1044,65 @@
     });
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') closeModal();
+    });
+
+    // -----------------------------------------------------------------------
+    // Live stream
+    // -----------------------------------------------------------------------
+    const liveStream = document.getElementById('live-stream');
+    const livePlaceholder = document.getElementById('live-placeholder');
+    const liveDot = document.getElementById('live-dot');
+    const liveStatusText = document.getElementById('live-status-text');
+    const liveWrapper = document.getElementById('live-wrapper');
+
+    function startLiveStream() {
+      livePlaceholder.textContent = 'Connecting\u2026';
+      livePlaceholder.classList.remove('hidden');
+      liveDot.classList.remove('connected');
+      liveStatusText.textContent = 'Connecting\u2026';
+      liveStream.src = '/api/live/mjpeg';
+    }
+
+    function stopLiveStream() {
+      liveStream.removeAttribute('src');
+      livePlaceholder.textContent = 'Disconnected';
+      livePlaceholder.classList.remove('hidden');
+      liveDot.classList.remove('connected');
+      liveStatusText.textContent = 'Disconnected';
+    }
+
+    liveStream.addEventListener('load', () => {
+      livePlaceholder.classList.add('hidden');
+      liveDot.classList.add('connected');
+      liveStatusText.textContent = 'Connected';
+    });
+
+    liveStream.addEventListener('error', () => {
+      if (currentTab !== 'live') return;
+      livePlaceholder.textContent = 'Connection lost';
+      livePlaceholder.classList.remove('hidden');
+      liveDot.classList.remove('connected');
+      liveStatusText.textContent = 'Disconnected';
+      setTimeout(() => {
+        if (currentTab === 'live') startLiveStream();
+      }, 3000);
+    });
+
+    document.getElementById('live-fullscreen').addEventListener('click', () => {
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else {
+        liveWrapper.requestFullscreen();
+      }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (currentTab !== 'live') return;
+      if (document.hidden) {
+        stopLiveStream();
+      } else {
+        startLiveStream();
+      }
     });
 
     // -----------------------------------------------------------------------
