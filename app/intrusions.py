@@ -190,6 +190,45 @@ def _list_date_dir(date_str: str) -> Path | None:
     return p if p.is_dir() else None
 
 
+def get_recording_end_utc(event_utc: datetime) -> datetime | None:
+    """Return the UTC end time of the video recording that covers *event_utc*.
+
+    Scans DAV files in the media directory around the event date (accounting
+    for camera timezone offset) and returns the end timestamp of the first
+    recording whose range contains *event_utc* (with ``MATCH_THRESHOLD_SECS``
+    tolerance).  Returns ``None`` when no matching file is found — typically
+    because the camera is still recording or no recording was triggered.
+
+    *event_utc* must be a **naive** datetime representing UTC.
+    """
+    tz = _get_local_tz()
+    event_aware = event_utc.replace(tzinfo=timezone.utc)
+    event_local = event_aware.astimezone(tz)
+    base_date = event_local.date()
+
+    tolerance = timedelta(seconds=MATCH_THRESHOLD_SECS)
+
+    for delta in (-1, 0, 1):
+        d = base_date + timedelta(days=delta)
+        ds = d.strftime("%Y-%m-%d")
+        date_dir = _list_date_dir(ds)
+        if date_dir is None:
+            continue
+        try:
+            files = os.listdir(date_dir)
+        except OSError:
+            continue
+        for f in files:
+            rng = _parse_dav_time_range(f, ds)
+            if rng is None:
+                continue
+            start_utc = _camera_to_utc(rng[0])
+            end_utc = _camera_to_utc(rng[1])
+            if (start_utc - tolerance) <= event_utc <= (end_utc + tolerance):
+                return end_utc
+    return None
+
+
 def match_media_for_events(
     events: list[dict], date_str: str
 ) -> list[dict]:

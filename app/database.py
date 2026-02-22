@@ -69,7 +69,7 @@ def init_db():
     logger.info("Database initialised at %s", DB_PATH)
 
 
-INTRUSION_DEBOUNCE_SECS = 10
+INTRUSION_DEBOUNCE_SECS = int(os.environ.get("INTRUSION_DEBOUNCE_SECS", "120"))
 
 
 def insert_event(
@@ -81,9 +81,11 @@ def insert_event(
     """Insert a single event with the current UTC timestamp.
 
     For traffic events, only inserts when the current time is between sunrise
-    and sunset at the configured location (CITY). Intrusion events are always
-    recorded regardless of time of day but are debounced so that events closer
-    than INTRUSION_DEBOUNCE_SECS apart are dropped.
+    and sunset at the configured location (CITY).  Intrusion events are always
+    recorded regardless of time of day but are debounced: if a previous
+    event's video recording (DAV file) covers the current time the event is
+    suppressed.  When no video file is available yet (camera still recording)
+    a fallback window of INTRUSION_DEBOUNCE_SECS is used instead.
     """
     now_utc = datetime.now(timezone.utc)
     if event_type == "traffic" and not is_daytime(now_utc):
@@ -93,20 +95,45 @@ def insert_event(
     now = now_utc.strftime("%Y-%m-%d %H:%M:%S")
 
     if event_type == "intrusion":
-        cutoff = (now_utc - timedelta(seconds=INTRUSION_DEBOUNCE_SECS)).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
-        row = conn.execute(
-            "SELECT 1 FROM events "
-            "WHERE event_type = 'intrusion' AND timestamp > ? LIMIT 1",
-            (cutoff,),
+        prev = conn.execute(
+            "SELECT timestamp FROM events "
+            "WHERE event_type = 'intrusion' ORDER BY timestamp DESC LIMIT 1",
         ).fetchone()
-        if row is not None:
-            logger.debug(
-                "Skipping intrusion event — another occurred within %ds",
-                INTRUSION_DEBOUNCE_SECS,
-            )
-            return
+        if prev is not None:
+            prev_ts = datetime.strptime(prev["timestamp"], "%Y-%m-%d %H:%M:%S")
+            now_naive = now_utc.replace(tzinfo=None)
+            elapsed = (now_naive - prev_ts).total_seconds()
+
+            if elapsed < 5:
+                logger.debug(
+                    "Skipping intrusion event — too close to previous (%.0fs)",
+                    elapsed,
+                )
+                return
+
+            from app.intrusions import get_recording_end_utc
+
+            video_end = get_recording_end_utc(prev_ts)
+            if video_end is not None:
+                if now_naive <= video_end:
+                    logger.debug(
+                        "Skipping intrusion event — within previous event's "
+                        "video recording (ends %s)",
+                        video_end.strftime("%H:%M:%S"),
+                    )
+                    return
+                logger.debug(
+                    "Previous video ended at %s, allowing new event",
+                    video_end.strftime("%H:%M:%S"),
+                )
+            elif elapsed < INTRUSION_DEBOUNCE_SECS:
+                logger.debug(
+                    "Skipping intrusion event — no video found yet, within "
+                    "fallback debounce window (%.0fs < %ds)",
+                    elapsed,
+                    INTRUSION_DEBOUNCE_SECS,
+                )
+                return
 
     conn.execute(
         "INSERT INTO events (timestamp, camera, direction, event_type, ivs_name) "
@@ -118,6 +145,56 @@ def insert_event(
         "Event recorded: type=%s ivs=%s camera=%s direction=%s at %s",
         event_type, ivs_name, camera, direction, now,
     )
+
+
+def delete_overlapping_intrusion_events() -> int:
+    """Delete intrusion events that fall within a previous event's video window.
+
+    Walks all intrusion events chronologically.  For each "anchor" event, the
+    gate (end of the suppression window) is set to the matched video recording
+    end time when a DAV file is found, or ``anchor + INTRUSION_DEBOUNCE_SECS``
+    as a fallback.  Any subsequent event within the gate is deleted.
+
+    Returns the number of deleted rows.
+    """
+    from app.intrusions import get_recording_end_utc
+
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT id, timestamp FROM events "
+        "WHERE event_type = 'intrusion' ORDER BY timestamp"
+    ).fetchall()
+
+    if not rows:
+        return 0
+
+    to_delete: list[int] = []
+    anchor_ts = datetime.strptime(rows[0]["timestamp"], "%Y-%m-%d %H:%M:%S")
+
+    video_end = get_recording_end_utc(anchor_ts)
+    gate = video_end if video_end is not None else anchor_ts + timedelta(seconds=INTRUSION_DEBOUNCE_SECS)
+
+    for row in rows[1:]:
+        ts = datetime.strptime(row["timestamp"], "%Y-%m-%d %H:%M:%S")
+        if ts <= gate:
+            to_delete.append(row["id"])
+        else:
+            anchor_ts = ts
+            video_end = get_recording_end_utc(anchor_ts)
+            gate = video_end if video_end is not None else anchor_ts + timedelta(seconds=INTRUSION_DEBOUNCE_SECS)
+
+    if to_delete:
+        # SQLite has a variable limit; batch in groups of 500
+        for i in range(0, len(to_delete), 500):
+            batch = to_delete[i : i + 500]
+            placeholders = ",".join("?" * len(batch))
+            conn.execute(
+                f"DELETE FROM events WHERE id IN ({placeholders})", batch
+            )
+        conn.commit()
+        logger.info("Deleted %d overlapping intrusion event(s)", len(to_delete))
+
+    return len(to_delete)
 
 
 def get_stats(range_key: str, date_str: str | None = None) -> dict:
