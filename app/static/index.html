@@ -916,7 +916,8 @@
 
         }
         if (!eventsResp.ok) throw new Error(`HTTP ${eventsResp.status}`);
-        const { events } = await eventsResp.json();
+        const { events, timezone: cameraTimezone } = await eventsResp.json();
+        const tz = cameraTimezone || 'UTC';
 
         countEl.textContent = `${events.length} event${events.length !== 1 ? 's' : ''}`;
         updateDateNavButtons();
@@ -954,7 +955,7 @@
           const timeEl = document.createElement('span');
           timeEl.className = 'time';
           const ts = new Date(ev.timestamp + 'Z');
-          timeEl.textContent = ts.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          timeEl.textContent = ts.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: tz });
           meta.appendChild(timeEl);
 
           const badges = document.createElement('span');
@@ -980,7 +981,7 @@
           meta.appendChild(badges);
           tile.appendChild(meta);
 
-          tile.addEventListener('click', () => openModal(ev));
+          tile.addEventListener('click', () => openModal(ev, tz));
           eventsGrid.appendChild(tile);
         });
       } catch (err) {
@@ -998,11 +999,12 @@
     const modalDownload = document.getElementById('modal-download');
     const modalCloseBtn = document.getElementById('modal-close');
 
-    function openModal(ev) {
+    function openModal(ev, cameraTimezone) {
       modalBody.innerHTML = '';
 
       const ts = new Date(ev.timestamp + 'Z');
-      modalTime.textContent = ts.toLocaleString();
+      const tz = cameraTimezone || 'UTC';
+      modalTime.textContent = ts.toLocaleString(undefined, { timeZone: tz });
 
       if (ev.video_url) {
         const video = document.createElement('video');

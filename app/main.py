@@ -21,6 +21,7 @@ from app.database import init_db, close_conn, get_stats, get_intrusion_events, g
 from app.dahua import DahuaListener, create_listener_from_env
 from app.intrusions import (
     MEDIA_PATH,
+    get_camera_timezone_name,
     match_media_for_events,
     convert_dav_to_mp4,
     get_cached_video_path,
@@ -239,7 +240,11 @@ async def api_intrusions(date: str = Query(default="")):
             ev["video_url"] = None
             ev["video_cached"] = False
 
-    return JSONResponse(content={"date": date, "events": enriched})
+    return JSONResponse(content={
+        "date": date,
+        "events": enriched,
+        "timezone": get_camera_timezone_name(),
+    })
 
 
 @app.get("/media/snapshot/{date_str}/{filename}")

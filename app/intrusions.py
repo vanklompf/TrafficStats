@@ -94,16 +94,16 @@ THUMB_QUALITY = int(os.environ.get("THUMB_QUALITY", "80"))
 # ---------------------------------------------------------------------------
 # Camera FTP uploads use the camera's local time in filenames.  Events in the
 # database are stored in UTC.  We need the camera timezone to convert file
-# timestamps to UTC before matching.
+# timestamps to UTC before matching and to display times at camera location.
 #
-# The system timezone (set via the standard TZ env var in Docker) is used.
+# The TZ env var (container timezone) is used as the camera timezone.
 # ZoneInfo gives us correct DST handling.
 
 _local_tz: ZoneInfo | None = None
 
 
 def _get_local_tz() -> ZoneInfo:
-    """Return the system local timezone (from TZ env var).  Cached."""
+    """Return the camera timezone (from TZ env var).  Cached."""
     global _local_tz
     if _local_tz is not None:
         return _local_tz
@@ -112,14 +112,19 @@ def _get_local_tz() -> ZoneInfo:
     if tz_name:
         try:
             _local_tz = ZoneInfo(tz_name)
-            logger.info("Local timezone from TZ: %s", tz_name)
+            logger.info("Camera timezone from TZ: %s", tz_name)
             return _local_tz
         except Exception:
             logger.warning("Invalid TZ=%s, falling back to UTC", tz_name)
 
     _local_tz = ZoneInfo("UTC")
-    logger.info("Local timezone: UTC (TZ not set)")
+    logger.info("Camera timezone: UTC (TZ not set)")
     return _local_tz
+
+
+def get_camera_timezone_name() -> str:
+    """Return the IANA timezone name used for the camera (from TZ env)."""
+    return _get_local_tz().key
 
 
 def _camera_to_utc(naive_dt: datetime) -> datetime:
