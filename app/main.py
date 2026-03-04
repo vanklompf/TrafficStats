@@ -26,6 +26,7 @@ from app.database import (
     get_intrusion_dates,
     get_analysis,
     get_analyses_for_events,
+    get_event_by_id,
 )
 from app.dahua import DahuaListener, create_listener_from_env
 from app.analysis import AnalysisWorker
@@ -254,15 +255,29 @@ async def api_intrusion_dates():
 
 @app.get("/api/intrusions/analysis/{event_id}")
 async def api_intrusion_analysis(event_id: int):
-    """Return analysis status and text for an intrusion event."""
+    """Return analysis status and text for an intrusion event.
+
+    If no analysis exists yet, enqueues the event for LLM description generation
+    (for older events not backfilled on startup) and returns status 'pending'.
+    """
     analysis = get_analysis(event_id)
-    if analysis is None:
+    if analysis is not None:
+        return JSONResponse(content={
+            "event_id": analysis["event_id"],
+            "status": analysis["status"],
+            "analysis": analysis["analysis"],
+            "model": analysis["model"],
+        })
+    event = get_event_by_id(event_id)
+    if event is None or event.get("event_type") != "intrusion":
         raise HTTPException(status_code=404, detail="No analysis for this event")
+    if _analysis_worker is not None:
+        _analysis_worker.enqueue(event_id)
     return JSONResponse(content={
-        "event_id": analysis["event_id"],
-        "status": analysis["status"],
-        "analysis": analysis["analysis"],
-        "model": analysis["model"],
+        "event_id": event_id,
+        "status": "pending",
+        "analysis": None,
+        "model": None,
     })
 
 

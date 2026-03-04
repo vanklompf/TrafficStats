@@ -1093,7 +1093,20 @@
       return div.innerHTML;
     }
 
-    function openModal(ev, cameraTimezone) {
+    async function openModal(ev, cameraTimezone) {
+      // Request analysis for older events that have none (triggers generation on open)
+      if (!ev.analysis_status && ev.id) {
+        try {
+          const r = await fetch('/api/intrusions/analysis/' + ev.id);
+          if (r.ok) {
+            const data = await r.json();
+            ev.analysis_status = data.status;
+            ev.analysis = data.analysis;
+            ev.analysis_model = data.model;
+          }
+        } catch (_) {}
+      }
+
       modalBody.innerHTML = '';
 
       const ts = new Date(ev.timestamp + 'Z');

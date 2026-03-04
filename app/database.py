@@ -499,15 +499,22 @@ def update_analysis(
     conn.commit()
 
 
-def get_intrusion_event_ids_without_analysis() -> list[int]:
-    """Return intrusion event IDs that have no analysis record (for backfill)."""
+def get_intrusion_event_ids_without_analysis(max_age_days: int | None = None) -> list[int]:
+    """Return intrusion event IDs that have no analysis record (for backfill).
+
+    If max_age_days is set, only return events with timestamp within that many days
+    (e.g. 7 = only events from the last 7 days). Use None to get all such events.
+    """
     conn = _get_conn()
-    rows = conn.execute(
-        """
+    sql = """
         SELECT e.id FROM events e
         LEFT JOIN event_analysis a ON e.id = a.event_id
         WHERE e.event_type = 'intrusion' AND a.event_id IS NULL
-        ORDER BY e.timestamp
-        """
-    ).fetchall()
+    """
+    params: tuple = ()
+    if max_age_days is not None:
+        sql += " AND e.timestamp >= datetime('now', ?)"
+        params = (f"-{max_age_days} days",)
+    sql += " ORDER BY e.timestamp"
+    rows = conn.execute(sql, params).fetchall()
     return [row["id"] for row in rows]

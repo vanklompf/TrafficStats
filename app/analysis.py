@@ -51,10 +51,14 @@ class AnalysisWorker:
         try:
             create_pending_analysis(event_id)
         except Exception as e:
-            logger.warning("Could not create pending analysis for event %s: %s", event_id, e)
+            event = get_event_by_id(event_id)
+            ts = event["timestamp"] if event else "?"
+            logger.warning("Could not create pending analysis for event %s (%s): %s", event_id, ts, e)
             return
         self._queue.put_nowait(event_id)
-        logger.debug("Enqueued event %s for analysis", event_id)
+        event = get_event_by_id(event_id)
+        ts = event["timestamp"] if event else "?"
+        logger.debug("Enqueued event %s (%s) for analysis", event_id, ts)
 
     def start(self) -> None:
         """Start the worker thread (daemon)."""
@@ -75,9 +79,9 @@ class AnalysisWorker:
         logger.info("Analysis worker stopped")
 
     def _backfill(self) -> None:
-        """Queue all intrusion events that have no analysis record."""
+        """Queue intrusion events from the last 7 days that have no analysis (no catch-up for older)."""
         try:
-            ids = get_intrusion_event_ids_without_analysis()
+            ids = get_intrusion_event_ids_without_analysis(max_age_days=7)
             for event_id in ids:
                 create_pending_analysis(event_id)
                 self._queue.put_nowait(event_id)
@@ -99,7 +103,8 @@ class AnalysisWorker:
         """Process a single event: wait for snapshot, call Ollama, store result."""
         event = get_event_by_id(event_id)
         if event is None or event.get("event_type") != "intrusion":
-            logger.debug("Event %s not found or not intrusion, skipping", event_id)
+            ts = event["timestamp"] if event else "?"
+            logger.debug("Event %s (%s) not found or not intrusion, skipping", event_id, ts)
             return
 
         timestamp = event["timestamp"]
@@ -119,7 +124,7 @@ class AnalysisWorker:
             time.sleep(2)
 
         if snapshot_path is None or not snapshot_path.is_file():
-            logger.warning("No snapshot found for event %s within %ds", event_id, ANALYSIS_SNAPSHOT_WAIT)
+            logger.warning("No snapshot found for event %s (%s) within %ds", event_id, timestamp, ANALYSIS_SNAPSHOT_WAIT)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
 
@@ -127,7 +132,7 @@ class AnalysisWorker:
             with open(snapshot_path, "rb") as f:
                 image_b64 = base64.b64encode(f.read()).decode("ascii")
         except OSError as e:
-            logger.warning("Cannot read snapshot for event %s: %s", event_id, e)
+            logger.warning("Cannot read snapshot for event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
 
@@ -149,11 +154,11 @@ class AnalysisWorker:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPStatusError as e:
-            logger.warning("Ollama API error for event %s: %s %s", event_id, e.response.status_code, e.response.text)
+            logger.warning("Ollama API error for event %s (%s): %s %s", event_id, timestamp, e.response.status_code, e.response.text)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
         except Exception as e:
-            logger.exception("Ollama request failed for event %s: %s", event_id, e)
+            logger.exception("Ollama request failed for event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
 
@@ -161,4 +166,4 @@ class AnalysisWorker:
         content = message.get("content") or ""
         model_used = data.get("model") or OLLAMA_MODEL
         update_analysis(event_id, "done", analysis=content.strip() or None, model=model_used)
-        logger.info("Analysis done for event %s (model: %s)", event_id, model_used)
+        logger.info("Analysis done for event %s (%s) (model: %s)", event_id, timestamp, model_used)
