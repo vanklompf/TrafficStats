@@ -1,0 +1,113 @@
+---
+description: Design of intrusion event LLM analysis subsystem (Ollama vision model). Reference when modifying analysis, database schema, API, or frontend analysis UI.
+globs: app/analysis.py,app/database.py,app/main.py,app/dahua.py,app/static/index.html,docker-compose.yml
+alwaysApply: false
+---
+
+# LLM Event Analysis Design
+
+## Overview
+
+Intrusion events detected by the Dahua camera are automatically analyzed by a local Ollama vision model. Analysis runs in a background thread so it never blocks event registration. Results are stored in SQLite and displayed in the web UI.
+
+## Data flow
+
+1. `DahuaListener._process_line()` (in `app/dahua.py`) detects an intrusion IVS event.
+2. Calls `insert_event(event_type="intrusion")` which returns the new `event_id` (int or None if debounced).
+3. If event was inserted, calls `self.on_intrusion_registered(event_id)` -- a callback wired to `AnalysisWorker.enqueue()`.
+4. `enqueue()` inserts a `pending` row into `event_analysis` via `create_pending_analysis()` and puts the id on a `queue.Queue`. This is non-blocking.
+5. The single worker thread picks up the id, polls for the snapshot file (up to `ANALYSIS_SNAPSHOT_WAIT` seconds, default 120), then sends the base64-encoded JPEG to `POST {OLLAMA_HOST}/api/chat` with `stream: false`.
+6. The Ollama response text is stored via `update_analysis(event_id, "done", ...)`.
+
+## Database schema
+
+Table `event_analysis` (created in `init_db()`):
+
+| Column | Type | Description |
+|---|---|---|
+| event_id | INTEGER PK | FK to events.id |
+| status | TEXT | `pending`, `done`, or `failed` |
+| analysis | TEXT | LLM response text (null when pending/failed) |
+| model | TEXT | Ollama model name used (null when pending/failed) |
+| created_at | TEXT | UTC timestamp when queued |
+| completed_at | TEXT | UTC timestamp when done/failed (null when pending) |
+
+Helper functions in `app/database.py`:
+- `create_pending_analysis(event_id)` -- INSERT OR IGNORE with status=pending.
+- `get_analysis(event_id)` -- single event lookup.
+- `get_analyses_for_events(event_ids)` -- batch lookup, returns dict keyed by event_id.
+- `update_analysis(event_id, status, analysis, model)` -- sets status, text, model, completed_at.
+- `get_event_by_id(event_id)` -- returns event row (id, timestamp, event_type).
+- `get_intrusion_event_ids_without_analysis(max_age_days)` -- LEFT JOIN to find events missing analysis rows, optionally bounded by age.
+
+## AnalysisWorker (app/analysis.py)
+
+- Single daemon thread, `queue.Queue[int]`, `threading.Event` for stop.
+- `enqueue(event_id)`: creates pending DB row, puts id on queue.
+- `start()`: launches thread, then calls `_backfill()`.
+- `_backfill()`: queues intrusion events from last 7 days that have no analysis row.
+- `_process_one(event_id)`: polls for snapshot via `match_media_for_events()`, reads JPEG, base64-encodes, calls Ollama `/api/chat`, stores result.
+- Snapshot polling sleeps 2s between checks up to `ANALYSIS_SNAPSHOT_WAIT`.
+- On any failure (no snapshot, API error, timeout), marks analysis as `failed`.
+
+## Ollama API usage
+
+Endpoint: `POST {OLLAMA_HOST}/api/chat`
+
+```json
+{
+  "model": "OLLAMA_MODEL value",
+  "stream": false,
+  "messages": [{
+    "role": "user",
+    "content": "OLLAMA_PROMPT value",
+    "images": ["<base64-encoded-jpeg>"]
+  }]
+}
+```
+
+Requires a vision-capable model (e.g. `moondream`, `llava`, `qwen3-vl`). Text-only models will fail.
+
+## API endpoints
+
+- `GET /api/intrusions?date=YYYY-MM-DD` -- enriched response includes `analysis_status`, `analysis`, `analysis_model` per event (from `get_analyses_for_events`).
+- `GET /api/intrusions/analysis/{event_id}` -- returns `{event_id, status, analysis, model}`. If no analysis exists yet, enqueues the event for analysis and returns status `pending` (lazy trigger for old events).
+
+## Frontend (app/static/index.html)
+
+### Tile badges
+- Green `badge-ai` when `analysis_status === 'done'`.
+- Pulsing yellow `badge-ai-pending` when `pending` or `processing`.
+- No badge when analysis is absent.
+
+### Modal
+- `openModal()` fetches `/api/intrusions/analysis/{id}` if `analysis_status` is null (triggers lazy analysis for old events).
+- `renderModalAnalysis(ev)` renders the analysis section below the media:
+  - Done: text in `modal-analysis-text`.
+  - Pending/processing: spinner with "Analyzing...".
+  - Failed: italic "Analysis failed".
+- Polls `/api/intrusions/analysis/{id}` every 3s while status is pending/processing; stops on done/failed.
+- Poll timer cleared in `closeModal()`.
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_HOST` | `http://ollama:11434` | Hardcoded in docker-compose |
+| `OLLAMA_MODEL` | `moondream` | Vision model name |
+| `OLLAMA_PROMPT` | (security camera analysis prompt) | System prompt sent with image |
+| `ANALYSIS_SNAPSHOT_WAIT` | `120` | Seconds to wait for snapshot file |
+| `OLLAMA_TIMEOUT` | `600` | HTTP timeout for Ollama request |
+
+## Docker networking
+
+The `trafficstats` container joins the external `ollama` Docker network (hardcoded in `docker-compose.yml`). This allows it to reach the Ollama container at hostname `ollama` on port `11434`.
+
+## Key design decisions
+
+- **Non-blocking**: `enqueue()` is fire-and-forget; the camera listener thread is never blocked by LLM inference.
+- **Single worker thread**: serializes Ollama calls to avoid overloading the GPU. Queue is unbounded.
+- **Backfill on startup**: events from the last 7 days without analysis are queued automatically.
+- **Lazy trigger via API**: opening the modal for an old event (no analysis row) triggers analysis on demand.
+- **Snapshot polling**: the snapshot file may not exist yet when the event fires (camera FTP upload delay). The worker retries every 2s.
+- **Graceful failure**: if the snapshot never arrives or Ollama errors, the analysis is marked `failed` and the UI shows this.
