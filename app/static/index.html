@@ -293,6 +293,19 @@
       background: rgba(239, 68, 68, .15);
       color: #f87171;
     }
+    .badge-ai {
+      background: rgba(52, 211, 153, .2);
+      color: #34d399;
+    }
+    .badge-ai-pending {
+      background: rgba(234, 179, 8, .2);
+      color: #eab308;
+      animation: pulse-ai 1.5s ease-in-out infinite;
+    }
+    @keyframes pulse-ai {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
 
     .empty-state {
       text-align: center;
@@ -370,6 +383,46 @@
       padding: 3rem 1rem;
       text-align: center;
       color: var(--text-dim);
+    }
+
+    .modal-analysis {
+      padding: .75rem 1rem;
+      border-top: 1px solid var(--border);
+      font-size: .875rem;
+    }
+    .modal-analysis h4 {
+      font-size: .75rem;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--text-dim);
+      margin-bottom: .5rem;
+    }
+    .modal-analysis-loading {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      color: var(--text-dim);
+    }
+    .modal-analysis-loading::before {
+      content: '';
+      width: 1rem;
+      height: 1rem;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .modal-analysis-text {
+      color: var(--text);
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .modal-analysis-failed {
+      color: var(--text-dim);
+      font-style: italic;
     }
 
     /* --- Live tab --- */
@@ -547,6 +600,7 @@
     <div class="modal-content" id="modal-content">
       <button class="modal-close" id="modal-close">&times;</button>
       <div id="modal-body"></div>
+      <div class="modal-analysis" id="modal-analysis" style="display: none;"></div>
       <div class="modal-info">
         <span id="modal-time"></span>
         <a id="modal-download" href="#" download style="color:var(--accent);font-size:.8rem;text-decoration:none;">Download</a>
@@ -978,6 +1032,19 @@
             b.textContent = 'No video';
             badges.appendChild(b);
           }
+          if (ev.analysis_status === 'done') {
+            const aiBadge = document.createElement('span');
+            aiBadge.className = 'badge badge-ai';
+            aiBadge.textContent = 'AI';
+            aiBadge.title = 'AI analysis available';
+            badges.appendChild(aiBadge);
+          } else if (ev.analysis_status === 'pending' || ev.analysis_status === 'processing') {
+            const aiBadge = document.createElement('span');
+            aiBadge.className = 'badge badge-ai-pending';
+            aiBadge.textContent = 'AI';
+            aiBadge.title = 'Analysis in progress';
+            badges.appendChild(aiBadge);
+          }
           meta.appendChild(badges);
           tile.appendChild(meta);
 
@@ -995,9 +1062,36 @@
     // -----------------------------------------------------------------------
     const modalOverlay = document.getElementById('modal-overlay');
     const modalBody = document.getElementById('modal-body');
+    const modalAnalysisEl = document.getElementById('modal-analysis');
     const modalTime = document.getElementById('modal-time');
     const modalDownload = document.getElementById('modal-download');
     const modalCloseBtn = document.getElementById('modal-close');
+    let modalAnalysisPollId = null;
+
+    function renderModalAnalysis(ev) {
+      const status = ev.analysis_status;
+      if (!status) {
+        modalAnalysisEl.style.display = 'none';
+        return;
+      }
+      modalAnalysisEl.style.display = 'block';
+      if (status === 'done' && ev.analysis) {
+        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-text">' +
+          escapeHtml(ev.analysis) + '</div>';
+      } else if (status === 'pending' || status === 'processing') {
+        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-loading">Analyzing…</div>';
+      } else if (status === 'failed') {
+        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-failed">Analysis failed</div>';
+      } else {
+        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-failed">No analysis</div>';
+      }
+    }
+
+    function escapeHtml(s) {
+      const div = document.createElement('div');
+      div.textContent = s;
+      return div.innerHTML;
+    }
 
     function openModal(ev, cameraTimezone) {
       modalBody.innerHTML = '';
@@ -1030,10 +1124,31 @@
         modalDownload.style.display = 'none';
       }
 
+      renderModalAnalysis(ev);
+
+      if ((ev.analysis_status === 'pending' || ev.analysis_status === 'processing') && ev.id) {
+        modalAnalysisPollId = setInterval(async () => {
+          try {
+            const r = await fetch('/api/intrusions/analysis/' + ev.id);
+            if (!r.ok) return;
+            const data = await r.json();
+            ev.analysis_status = data.status;
+            ev.analysis = data.analysis;
+            ev.analysis_model = data.model;
+            renderModalAnalysis(ev);
+            if (data.status === 'done' || data.status === 'failed') clearInterval(modalAnalysisPollId);
+          } catch (_) {}
+        }, 3000);
+      }
+
       modalOverlay.classList.add('open');
     }
 
     function closeModal() {
+      if (modalAnalysisPollId) {
+        clearInterval(modalAnalysisPollId);
+        modalAnalysisPollId = null;
+      }
       modalOverlay.classList.remove('open');
       // Stop any playing video
       const vid = modalBody.querySelector('video');
