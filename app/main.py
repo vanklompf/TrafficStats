@@ -7,6 +7,7 @@ On startup, initialises the database and launches the Dahua event listener.
 """
 
 import logging
+import os
 import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -40,6 +41,26 @@ from app.intrusions import (
 
 logger = logging.getLogger(__name__)
 
+# Match HTTP 2xx status in uvicorn access log messages (e.g. " 200 OK")
+_ACCESS_LOG_2XX_RE = re.compile(r" 2\d{2} ")
+
+
+class _AccessLogFilter(logging.Filter):
+    """Filter so 2xx access log lines are only emitted when log level is DEBUG."""
+
+    def __init__(self, app_log_level: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._show_2xx = app_log_level <= logging.DEBUG
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.access":
+            return True
+        msg = record.getMessage()
+        if _ACCESS_LOG_2XX_RE.search(msg):
+            return self._show_2xx
+        return True
+
+
 _listener: DahuaListener | None = None
 _analysis_worker: AnalysisWorker | None = None
 
@@ -49,11 +70,15 @@ async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
     global _listener, _analysis_worker
 
-    # Configure logging
+    # Configure logging level from env (default INFO)
+    log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
     logging.basicConfig(
-        level=logging.INFO,
+        level=log_level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # Successful (2xx) access logs only at DEBUG
+    logging.getLogger("uvicorn.access").addFilter(_AccessLogFilter(log_level))
 
     # Initialise database
     init_db()

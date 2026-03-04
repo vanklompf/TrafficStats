@@ -17,6 +17,7 @@ Edit `.env`:
 
 | Variable | Description | Default |
 |---|---|---|
+| `LOG_LEVEL` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`. At `INFO`, successful HTTP requests (2xx) are not logged; use `DEBUG` to see them. | `INFO` |
 | `DAHUA_HOST` | Camera IP address | `192.168.1.108` |
 | `DAHUA_PORT` | Camera HTTP port | `80` |
 | `DAHUA_USER` | Camera username | `admin` |
