@@ -13,6 +13,8 @@ services:
       - /dev/dri:/dev/dri
     group_add:
       - "109"
+    networks:
+      - ollama
     environment:
       - PUID=${PUID:-1001}
       - PGID=${PGID:-1001}
@@ -25,5 +27,11 @@ services:
       - VIDEO_CACHE_MAX_GB=${VIDEO_CACHE_MAX_GB:-20}
       - VIDEO_HW_ACCEL=${VIDEO_HW_ACCEL:-auto}
       - TZ=${TZ:-Europe/Warsaw}
+      - OLLAMA_HOST=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3-vl:8b}
     env_file:
       - .env
+
+networks:
+  ollama:
+    external: true

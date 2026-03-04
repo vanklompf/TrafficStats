@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import threading
+from typing import Callable
 
 import httpx
 
@@ -40,6 +41,7 @@ class DahuaListener:
         protocol: str = "http",
         ivs_names: str = "",
         intrusion_ivs_name: str = "intrusion",
+        on_intrusion_registered: Callable[[int], None] | None = None,
     ):
         self.host = host
         self.port = port
@@ -51,6 +53,7 @@ class DahuaListener:
             n.strip() for n in ivs_names.split(",") if n.strip()
         }
         self.intrusion_ivs_name = intrusion_ivs_name.strip()
+        self.on_intrusion_registered = on_intrusion_registered
         self.url = EVENT_URL_TEMPLATE.format(
             protocol=protocol,
             host=host,
@@ -184,12 +187,14 @@ class DahuaListener:
             "Event: type=%s code=%s name=%s direction=%s camera=%s",
             event_type, code, ivs_name, direction, camera_name,
         )
-        insert_event(
+        event_id = insert_event(
             camera=camera_name,
             direction=direction,
             event_type=event_type,
             ivs_name=ivs_name,
         )
+        if event_type == "intrusion" and event_id is not None and self.on_intrusion_registered is not None:
+            self.on_intrusion_registered(event_id)
 
 
 def _parse_int_env(name: str, default: int) -> int:
@@ -204,7 +209,9 @@ def _parse_int_env(name: str, default: int) -> int:
         return default
 
 
-def create_listener_from_env() -> DahuaListener | None:
+def create_listener_from_env(
+    on_intrusion_registered: Callable[[int], None] | None = None,
+) -> DahuaListener | None:
     """Build a DahuaListener from environment variables."""
     host = os.environ.get("DAHUA_HOST", "")
     if not host:
@@ -226,4 +233,5 @@ def create_listener_from_env() -> DahuaListener | None:
         protocol=os.environ.get("DAHUA_PROTOCOL", "http"),
         ivs_names=os.environ.get("DAHUA_IVS_NAMES", "CarDetection"),
         intrusion_ivs_name=os.environ.get("DAHUA_INTRUSION_IVS_NAME", "intrusion"),
+        on_intrusion_registered=on_intrusion_registered,
     )

@@ -17,8 +17,17 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.database import init_db, close_conn, get_stats, get_intrusion_events, get_intrusion_dates
+from app.database import (
+    init_db,
+    close_conn,
+    get_stats,
+    get_intrusion_events,
+    get_intrusion_dates,
+    get_analysis,
+    get_analyses_for_events,
+)
 from app.dahua import DahuaListener, create_listener_from_env
+from app.analysis import AnalysisWorker
 from app.intrusions import (
     MEDIA_PATH,
     get_camera_timezone_name,
@@ -32,12 +41,13 @@ from app.intrusions import (
 logger = logging.getLogger(__name__)
 
 _listener: DahuaListener | None = None
+_analysis_worker: AnalysisWorker | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown hooks."""
-    global _listener
+    global _listener, _analysis_worker
 
     # Configure logging
     logging.basicConfig(
@@ -48,8 +58,14 @@ async def lifespan(app: FastAPI):
     # Initialise database
     init_db()
 
-    # Start Dahua event listener
-    _listener = create_listener_from_env()
+    # Start analysis worker (Ollama snapshot analysis)
+    _analysis_worker = AnalysisWorker()
+    _analysis_worker.start()
+
+    # Start Dahua event listener (notify worker when intrusion is registered)
+    _listener = create_listener_from_env(
+        on_intrusion_registered=_analysis_worker.enqueue,
+    )
     if _listener is not None:
         _listener.start()
     else:
@@ -58,6 +74,8 @@ async def lifespan(app: FastAPI):
     yield
 
     # Shutdown
+    if _analysis_worker is not None:
+        _analysis_worker.stop()
     if _listener is not None:
         _listener.stop()
     close_conn()
@@ -209,6 +227,20 @@ async def api_intrusion_dates():
     return JSONResponse(content={"dates": get_intrusion_dates()})
 
 
+@app.get("/api/intrusions/analysis/{event_id}")
+async def api_intrusion_analysis(event_id: int):
+    """Return analysis status and text for an intrusion event."""
+    analysis = get_analysis(event_id)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="No analysis for this event")
+    return JSONResponse(content={
+        "event_id": analysis["event_id"],
+        "status": analysis["status"],
+        "analysis": analysis["analysis"],
+        "model": analysis["model"],
+    })
+
+
 @app.get("/api/intrusions")
 async def api_intrusions(date: str = Query(default="")):
     """
@@ -221,6 +253,14 @@ async def api_intrusions(date: str = Query(default="")):
     date = _validate_date(date)
     events = get_intrusion_events(date)
     enriched = match_media_for_events(events, date)
+
+    # Attach analysis status for each event
+    analyses = get_analyses_for_events([ev["id"] for ev in enriched])
+    for ev in enriched:
+        a = analyses.get(ev["id"])
+        ev["analysis_status"] = a["status"] if a else None
+        ev["analysis"] = a["analysis"] if a else None
+        ev["analysis_model"] = a["model"] if a else None
 
     # Build URLs for each event's media (file may live in an adjacent
     # date directory when the camera timezone differs from UTC).

@@ -65,6 +65,18 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_events_type_timestamp
         ON events (event_type, timestamp)
     """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS event_analysis (
+            event_id INTEGER PRIMARY KEY,
+            status TEXT NOT NULL DEFAULT 'pending',
+            analysis TEXT,
+            model TEXT,
+            created_at TEXT NOT NULL,
+            completed_at TEXT,
+            FOREIGN KEY (event_id) REFERENCES events(id)
+        )
+    """)
     conn.commit()
     logger.info("Database initialised at %s", DB_PATH)
 
@@ -77,7 +89,7 @@ def insert_event(
     direction: str = "",
     event_type: str = "traffic",
     ivs_name: str = "",
-):
+) -> int | None:
     """Insert a single event with the current UTC timestamp.
 
     For traffic events, only inserts when the current time is between sunrise
@@ -86,11 +98,13 @@ def insert_event(
     event's video recording (DAV file) covers the current time the event is
     suppressed.  When no video file is available yet (camera still recording)
     a fallback window of INTRUSION_DEBOUNCE_SECS is used instead.
+
+    Returns the new event id when an event is inserted, None when skipped.
     """
     now_utc = datetime.now(timezone.utc)
     if event_type == "traffic" and not is_daytime(now_utc):
         logger.debug("Skipping traffic event outside collection window (sunrise–sunset)")
-        return
+        return None
     conn = _get_conn()
     now = now_utc.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -109,7 +123,7 @@ def insert_event(
                     "Skipping intrusion event — too close to previous (%.0fs)",
                     elapsed,
                 )
-                return
+                return None
 
             from app.intrusions import get_recording_end_utc
 
@@ -121,7 +135,7 @@ def insert_event(
                         "video recording (ends %s)",
                         video_end.strftime("%H:%M:%S"),
                     )
-                    return
+                    return None
                 logger.debug(
                     "Previous video ended at %s, allowing new event",
                     video_end.strftime("%H:%M:%S"),
@@ -133,18 +147,20 @@ def insert_event(
                     elapsed,
                     INTRUSION_DEBOUNCE_SECS,
                 )
-                return
+                return None
 
-    conn.execute(
+    cursor = conn.execute(
         "INSERT INTO events (timestamp, camera, direction, event_type, ivs_name) "
         "VALUES (?, ?, ?, ?, ?)",
         (now, camera, direction, event_type, ivs_name),
     )
+    event_id = cursor.lastrowid
     conn.commit()
     logger.info(
         "Event recorded: type=%s ivs=%s camera=%s direction=%s at %s",
         event_type, ivs_name, camera, direction, now,
     )
+    return event_id
 
 
 def delete_overlapping_intrusion_events() -> int:
@@ -353,6 +369,18 @@ def get_stats(range_key: str, date_str: str | None = None) -> dict:
     }
 
 
+def get_event_by_id(event_id: int) -> dict | None:
+    """Return event row as dict with id, timestamp, event_type, or None if not found."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT id, timestamp, event_type FROM events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"id": row["id"], "timestamp": row["timestamp"], "event_type": row["event_type"]}
+
+
 def get_intrusion_events(date_str: str) -> list[dict]:
     """
     Return all intrusion events for a given date (YYYY-MM-DD, UTC).
@@ -385,3 +413,101 @@ def get_intrusion_dates() -> list[str]:
         """
     ).fetchall()
     return [row["d"] for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Event analysis (Ollama LLM)
+# ---------------------------------------------------------------------------
+
+
+def create_pending_analysis(event_id: int) -> None:
+    """Insert a pending analysis record for the given intrusion event."""
+    conn = _get_conn()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT OR IGNORE INTO event_analysis (event_id, status, created_at) "
+        "VALUES (?, 'pending', ?)",
+        (event_id, now),
+    )
+    conn.commit()
+
+
+def get_analysis(event_id: int) -> dict | None:
+    """Return analysis record for one event, or None if none exists."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT event_id, status, analysis, model, created_at, completed_at "
+        "FROM event_analysis WHERE event_id = ?",
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "event_id": row["event_id"],
+        "status": row["status"],
+        "analysis": row["analysis"],
+        "model": row["model"],
+        "created_at": row["created_at"],
+        "completed_at": row["completed_at"],
+    }
+
+
+def get_analyses_for_events(event_ids: list[int]) -> dict[int, dict]:
+    """Return analysis records for the given event IDs keyed by event_id."""
+    if not event_ids:
+        return {}
+    conn = _get_conn()
+    placeholders = ",".join("?" * len(event_ids))
+    rows = conn.execute(
+        "SELECT event_id, status, analysis, model, created_at, completed_at "
+        "FROM event_analysis WHERE event_id IN (" + placeholders + ")",
+        event_ids,
+    ).fetchall()
+    return {
+        row["event_id"]: {
+            "event_id": row["event_id"],
+            "status": row["status"],
+            "analysis": row["analysis"],
+            "model": row["model"],
+            "created_at": row["created_at"],
+            "completed_at": row["completed_at"],
+        }
+        for row in rows
+    }
+
+
+def update_analysis(
+    event_id: int,
+    status: str,
+    analysis: str | None = None,
+    model: str | None = None,
+) -> None:
+    """Update an analysis record after completion or failure."""
+    conn = _get_conn()
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    if status in ("done", "failed"):
+        conn.execute(
+            "UPDATE event_analysis SET status = ?, analysis = ?, model = ?, completed_at = ? "
+            "WHERE event_id = ?",
+            (status, analysis, model, now, event_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE event_analysis SET status = ? WHERE event_id = ?",
+            (status, event_id),
+        )
+    conn.commit()
+
+
+def get_intrusion_event_ids_without_analysis() -> list[int]:
+    """Return intrusion event IDs that have no analysis record (for backfill)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT e.id FROM events e
+        LEFT JOIN event_analysis a ON e.id = a.event_id
+        WHERE e.event_type = 'intrusion' AND a.event_id IS NULL
+        ORDER BY e.timestamp
+        """
+    ).fetchall()
+    return [row["id"] for row in rows]
