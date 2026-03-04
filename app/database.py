@@ -499,6 +499,28 @@ def update_analysis(
     conn.commit()
 
 
+def get_pending_analyses() -> list[dict]:
+    """Return all pending analysis records with event timestamp, ordered by queue (created_at)."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT a.event_id, a.created_at, e.timestamp AS event_timestamp
+        FROM event_analysis a
+        JOIN events e ON e.id = a.event_id
+        WHERE a.status = 'pending'
+        ORDER BY a.created_at
+        """
+    ).fetchall()
+    return [
+        {
+            "event_id": row["event_id"],
+            "created_at": row["created_at"],
+            "event_timestamp": row["event_timestamp"],
+        }
+        for row in rows
+    ]
+
+
 def get_intrusion_event_ids_without_analysis(max_age_days: int | None = None) -> list[int]:
     """Return intrusion event IDs that have no analysis record (for backfill).
 

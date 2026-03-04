@@ -211,6 +211,63 @@
       margin-left: auto;
     }
 
+    .analysis-queue-btn {
+      margin-left: .5rem;
+    }
+    .analysis-queue-btn .queue-count {
+      background: var(--accent);
+      color: #fff;
+      font-size: .75rem;
+      padding: .15rem .45rem;
+      border-radius: 999px;
+      margin-left: .35rem;
+    }
+
+    .analysis-queue-panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      margin-bottom: 1.5rem;
+    }
+    .analysis-queue-panel h3 {
+      font-size: .9rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      margin-bottom: .75rem;
+    }
+    .analysis-queue-list {
+      list-style: none;
+    }
+    .analysis-queue-list li {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: .5rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: .875rem;
+    }
+    .analysis-queue-list li:last-child {
+      border-bottom: none;
+    }
+    .analysis-queue-list .queue-pos {
+      color: var(--text-dim);
+      min-width: 1.5rem;
+    }
+    .analysis-queue-list .event-time {
+      color: var(--text);
+    }
+    .analysis-queue-list .queued-at {
+      color: var(--text-dim);
+      font-size: .8rem;
+      margin-left: auto;
+    }
+    .analysis-queue-empty {
+      color: var(--text-dim);
+      font-size: .875rem;
+      padding: .5rem 0;
+    }
+
     .events-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -573,6 +630,14 @@
         <button class="btn date-nav-btn" id="date-next" title="Next day">&rarr;</button>
         <span class="weekday-label" id="weekday-label"></span>
         <span class="intrusions-count" id="intrusion-count"></span>
+        <button class="btn analysis-queue-btn" id="analysis-queue-btn" title="View items waiting for AI analysis">
+          Analysis queue<span class="queue-count" id="queue-count-badge" style="display: none;"></span>
+        </button>
+      </div>
+      <div class="analysis-queue-panel" id="analysis-queue-panel" style="display: none;">
+        <h3>Waiting for LLM analysis</h3>
+        <ul class="analysis-queue-list" id="analysis-queue-list"></ul>
+        <div class="analysis-queue-empty" id="analysis-queue-empty" style="display: none;">No items in queue.</div>
       </div>
       <div id="events-grid" class="events-grid"></div>
     </div>
@@ -949,6 +1014,69 @@
     datePrevBtn.addEventListener('click', shiftDatePrev);
     dateNextBtn.addEventListener('click', shiftDateNext);
 
+    // -----------------------------------------------------------------------
+    // Analysis queue panel
+    // -----------------------------------------------------------------------
+    const analysisQueueBtn = document.getElementById('analysis-queue-btn');
+    const analysisQueuePanel = document.getElementById('analysis-queue-panel');
+    const analysisQueueList = document.getElementById('analysis-queue-list');
+    const analysisQueueEmpty = document.getElementById('analysis-queue-empty');
+    const queueCountBadge = document.getElementById('queue-count-badge');
+    let analysisQueuePollId = null;
+    const ANALYSIS_QUEUE_POLL_MS = 5000;
+
+    async function fetchAnalysisQueue() {
+      const res = await fetch('/api/intrusions/analysis/queue');
+      if (!res.ok) return null;
+      return res.json();
+    }
+
+    function renderAnalysisQueue(data) {
+      if (!data) return;
+      const pending = data.pending || [];
+      if (queueCountBadge) {
+        if (pending.length > 0) {
+          queueCountBadge.textContent = pending.length;
+          queueCountBadge.style.display = 'inline';
+        } else {
+          queueCountBadge.style.display = 'none';
+        }
+      }
+      if (!analysisQueuePanel || analysisQueuePanel.style.display === 'none') return;
+      if (pending.length === 0) {
+        analysisQueueList.innerHTML = '';
+        analysisQueueEmpty.style.display = 'block';
+        analysisQueueEmpty.textContent = 'No items waiting for analysis.';
+        return;
+      }
+      analysisQueueEmpty.style.display = 'none';
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      analysisQueueList.innerHTML = pending.map((item, i) => {
+        const eventTime = new Date(item.event_timestamp + 'Z').toLocaleString(undefined, { timeZone: tz, dateStyle: 'short', timeStyle: 'medium' });
+        const queuedAt = item.created_at ? new Date(item.created_at + 'Z').toLocaleString(undefined, { timeZone: tz, dateStyle: 'short', timeStyle: 'medium' }) : '—';
+        return `<li><span class="queue-pos">${i + 1}</span><span class="event-time">Event ${item.event_id}</span><span class="queued-at">${escapeHtml(eventTime)} · queued ${escapeHtml(queuedAt)}</span></li>`;
+      }).join('');
+    }
+
+    async function loadAnalysisQueue() {
+      const data = await fetchAnalysisQueue();
+      renderAnalysisQueue(data);
+    }
+
+    analysisQueueBtn.addEventListener('click', () => {
+      const isOpening = analysisQueuePanel.style.display === 'none';
+      analysisQueuePanel.style.display = isOpening ? 'block' : 'none';
+      if (isOpening) {
+        loadAnalysisQueue();
+        analysisQueuePollId = setInterval(loadAnalysisQueue, ANALYSIS_QUEUE_POLL_MS);
+      } else {
+        if (analysisQueuePollId) {
+          clearInterval(analysisQueuePollId);
+          analysisQueuePollId = null;
+        }
+      }
+    });
+
     async function loadIntrusions() {
       let dateStr = dateInput.value;
       if (!dateStr) return;
@@ -975,6 +1103,7 @@
 
         countEl.textContent = `${events.length} event${events.length !== 1 ? 's' : ''}`;
         updateDateNavButtons();
+        fetchAnalysisQueue().then(renderAnalysisQueue);
 
         if (events.length === 0) {
           eventsGrid.innerHTML = '<div class="empty-state">No intrusion events on this date</div>';

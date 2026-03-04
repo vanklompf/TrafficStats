@@ -27,6 +27,7 @@ from app.database import (
     get_analysis,
     get_analyses_for_events,
     get_event_by_id,
+    get_pending_analyses,
 )
 from app.dahua import DahuaListener, create_listener_from_env
 from app.analysis import AnalysisWorker
@@ -251,6 +252,17 @@ def _validate_filename(filename: str) -> str:
 async def api_intrusion_dates():
     """Return list of dates that have intrusion events."""
     return JSONResponse(content={"dates": get_intrusion_dates()})
+
+
+@app.get("/api/intrusions/analysis/queue")
+async def api_analysis_queue():
+    """Return list of events waiting for or currently in LLM analysis (pending), plus queue size."""
+    pending = get_pending_analyses()
+    queue_size = _analysis_worker.get_queue_size() if _analysis_worker is not None else 0
+    return JSONResponse(content={
+        "pending": pending,
+        "queue_size": queue_size,
+    })
 
 
 @app.get("/api/intrusions/analysis/{event_id}")

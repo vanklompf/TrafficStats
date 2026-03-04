@@ -6,6 +6,7 @@ snapshot file, sends it to Ollama, and stores the result in the database.
 """
 
 import base64
+import io
 import logging
 import os
 import queue
@@ -14,6 +15,7 @@ import time
 from pathlib import Path
 
 import httpx
+from PIL import Image
 
 from app.database import (
     create_pending_analysis,
@@ -36,6 +38,8 @@ OLLAMA_PROMPT = os.environ.get(
 )
 ANALYSIS_SNAPSHOT_WAIT = int(os.environ.get("ANALYSIS_SNAPSHOT_WAIT", "120"))
 OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "600"))
+# Max width (px) for snapshots sent to the LLM; larger images are downscaled.
+ANALYSIS_SNAPSHOT_MAX_WIDTH = int(os.environ.get("ANALYSIS_SNAPSHOT_MAX_WIDTH", "1024"))
 
 
 class AnalysisWorker:
@@ -45,6 +49,10 @@ class AnalysisWorker:
         self._queue: queue.Queue[int] = queue.Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def get_queue_size(self) -> int:
+        """Return approximate number of event IDs waiting in the in-memory queue."""
+        return self._queue.qsize()
 
     def enqueue(self, event_id: int) -> None:
         """Schedule an intrusion event for analysis. Non-blocking."""
@@ -129,10 +137,26 @@ class AnalysisWorker:
             return
 
         try:
-            with open(snapshot_path, "rb") as f:
-                image_b64 = base64.b64encode(f.read()).decode("ascii")
+            with Image.open(snapshot_path) as img:
+                img.load()
+                w, h = img.size
+                if w > ANALYSIS_SNAPSHOT_MAX_WIDTH:
+                    ratio = ANALYSIS_SNAPSHOT_MAX_WIDTH / w
+                    new_w = ANALYSIS_SNAPSHOT_MAX_WIDTH
+                    new_h = int(h * ratio)
+                    img = img.resize((new_w, new_h), Image.LANCZOS)
+                    logger.debug("Resized snapshot for LLM: %dx%d -> %dx%d", w, h, new_w, new_h)
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", quality=85, optimize=True)
+                image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         except OSError as e:
             logger.warning("Cannot read snapshot for event %s (%s): %s", event_id, timestamp, e)
+            update_analysis(event_id, "failed", analysis=None, model=None)
+            return
+        except Exception as e:
+            logger.warning("Cannot process snapshot for event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
 
