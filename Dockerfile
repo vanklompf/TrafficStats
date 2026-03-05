@@ -6,7 +6,7 @@ RUN . /etc/os-release && \
     done && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
-        ffmpeg curl gosu \
+        ffmpeg curl gosu sqlite3 \
         intel-media-va-driver-non-free libmfx-gen1.2 && \
     rm -rf /var/lib/apt/lists/*
 

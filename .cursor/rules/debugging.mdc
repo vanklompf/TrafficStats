@@ -31,9 +31,11 @@ The app runs as `appuser` (UID/GID from `PUID`/`PGID`). Data is at `/data` (SQLi
 
 ## 4. Inspect the database
 
+The DB path defaults to `/data/traffic.db` (override with `DB_PATH`).
+
 ```bash
-docker exec trafficstats sqlite3 /data/trafficstats.db ".tables"
-docker exec trafficstats sqlite3 /data/trafficstats.db "SELECT * FROM events ORDER BY id DESC LIMIT 10;"
+docker exec trafficstats sqlite3 /data/traffic.db ".tables"
+docker exec trafficstats sqlite3 /data/traffic.db "SELECT * FROM events ORDER BY id DESC LIMIT 10;"
 ```
 
 ## 5. Common issues
