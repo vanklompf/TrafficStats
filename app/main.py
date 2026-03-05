@@ -62,6 +62,7 @@ async def lifespan(app: FastAPI):
     # Access logs (GET ... 200 OK etc.) only at DEBUG; at INFO use WARNING so they are not shown
     access_log_level = logging.DEBUG if log_level <= logging.DEBUG else logging.WARNING
     logging.getLogger("uvicorn.access").setLevel(access_log_level)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     # Initialise database
     init_db()
