@@ -1,8 +1,9 @@
 """
 Background analysis of intrusion event snapshots using a local Ollama vision model.
 
-Events are queued after registration; a single worker thread polls for the
+Events are queued in memory after registration; a single worker thread polls for the
 snapshot file, sends it to Ollama, and stores the result in the database.
+Queue is repopulated on startup from unprocessed events in the last 7 days.
 """
 
 import base64
@@ -12,13 +13,13 @@ import os
 import queue
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
 from PIL import Image
 
 from app.database import (
-    create_pending_analysis,
     get_event_by_id,
     get_intrusion_event_ids_without_analysis,
     update_analysis,
@@ -43,30 +44,40 @@ ANALYSIS_SNAPSHOT_MAX_WIDTH = int(os.environ.get("ANALYSIS_SNAPSHOT_MAX_WIDTH", 
 
 
 class AnalysisWorker:
-    """Single-threaded worker that processes intrusion events for LLM analysis."""
+    """Single-threaded worker that processes intrusion events for LLM analysis.
+
+    Queue is kept in memory only; on startup it is filled from events without
+    analysis in the last 7 days.
+    """
 
     def __init__(self):
         self._queue: queue.Queue[int] = queue.Queue()
+        self._queue_contents: list[dict] = []  # [{event_id, created_at}, ...] for API
+        self._queue_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def get_queue_size(self) -> int:
-        """Return approximate number of event IDs waiting in the in-memory queue."""
-        return self._queue.qsize()
+        """Return number of event IDs waiting in the in-memory queue."""
+        with self._queue_lock:
+            return len(self._queue_contents)
+
+    def get_queue_contents(self) -> list[dict]:
+        """Return snapshot of queue: list of {event_id, created_at} in order."""
+        with self._queue_lock:
+            return [dict(item) for item in self._queue_contents]
 
     def enqueue(self, event_id: int) -> None:
-        """Schedule an intrusion event for analysis. Non-blocking."""
-        try:
-            create_pending_analysis(event_id)
-        except Exception as e:
-            event = get_event_by_id(event_id)
-            ts = event["timestamp"] if event else "?"
-            logger.warning("Could not create pending analysis for event %s (%s): %s", event_id, ts, e)
-            return
+        """Schedule an intrusion event for analysis. Non-blocking. No DB persistence."""
+        with self._queue_lock:
+            if any(item["event_id"] == event_id for item in self._queue_contents):
+                return
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            self._queue_contents.append({"event_id": event_id, "created_at": now})
         self._queue.put_nowait(event_id)
         event = get_event_by_id(event_id)
         ts = event["timestamp"] if event else "?"
-        logger.debug("Enqueued event %s (%s) for analysis", event_id, ts)
+        logger.info("[AI] Enqueued event %s (%s) for analysis", event_id, ts)
 
     def start(self) -> None:
         """Start the worker thread (daemon)."""
@@ -87,12 +98,16 @@ class AnalysisWorker:
         logger.info("[AI] Analysis worker stopped")
 
     def _backfill(self) -> None:
-        """Queue intrusion events from the last 7 days that have no analysis (no catch-up for older)."""
+        """Queue intrusion events from the last 7 days that have no analysis (in-memory only)."""
         try:
             ids = get_intrusion_event_ids_without_analysis(max_age_days=7)
-            for event_id in ids:
-                create_pending_analysis(event_id)
-                self._queue.put_nowait(event_id)
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            with self._queue_lock:
+                for event_id in ids:
+                    if any(item["event_id"] == event_id for item in self._queue_contents):
+                        continue
+                    self._queue_contents.append({"event_id": event_id, "created_at": now})
+                    self._queue.put_nowait(event_id)
             if ids:
                 logger.info("[AI] Backfill: queued %d intrusion event(s) for analysis", len(ids))
         except Exception as e:
@@ -105,6 +120,8 @@ class AnalysisWorker:
                 event_id = self._queue.get(timeout=1)
             except queue.Empty:
                 continue
+            with self._queue_lock:
+                self._queue_contents[:] = [x for x in self._queue_contents if x["event_id"] != event_id]
             self._process_one(event_id)
 
     def _process_one(self, event_id: int) -> None:

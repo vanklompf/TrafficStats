@@ -15,39 +15,36 @@ Intrusion events detected by the Dahua camera are automatically analyzed by a lo
 1. `DahuaListener._process_line()` (in `app/dahua.py`) detects an intrusion IVS event.
 2. Calls `insert_event(event_type="intrusion")` which returns the new `event_id` (int or None if debounced).
 3. If event was inserted, calls `self.on_intrusion_registered(event_id)` -- a callback wired to `AnalysisWorker.enqueue()`.
-4. `enqueue()` inserts a `pending` row into `event_analysis` via `create_pending_analysis()` and puts the id on a `queue.Queue`. This is non-blocking.
+4. `enqueue()` puts the event id on an in-memory `queue.Queue` and appends to `_queue_contents` for the queue API. No DB persistence for the queue; it is lost on app restart and repopulated from unprocessed events (last 7 days).
 5. The single worker thread picks up the id, polls for the snapshot file (up to `ANALYSIS_SNAPSHOT_WAIT` seconds, default 120), resizes the image to max width `ANALYSIS_SNAPSHOT_MAX_WIDTH` (default 1024px) if larger, then sends the base64-encoded JPEG to `POST {OLLAMA_HOST}/api/chat` with `stream: false`.
 6. The Ollama response text is stored via `update_analysis(event_id, "done", ...)`.
 
 ## Database schema
 
-Table `event_analysis` (created in `init_db()`):
+Table `event_analysis` (created in `init_db()`). Rows are only written when analysis completes (done) or fails; no `pending` rows exist. On startup, stale `pending` rows from older versions are deleted and the `created_at` column is dropped.
 
 | Column | Type | Description |
 |---|---|---|
 | event_id | INTEGER PK | FK to events.id |
-| status | TEXT | `pending`, `done`, or `failed` |
-| analysis | TEXT | LLM response text (null when pending/failed) |
-| model | TEXT | Ollama model name used (null when pending/failed) |
-| created_at | TEXT | UTC timestamp when queued |
-| completed_at | TEXT | UTC timestamp when done/failed (null when pending) |
+| status | TEXT | `done` or `failed` (no `pending`; queue is in-memory) |
+| analysis | TEXT | LLM response text (null when failed) |
+| model | TEXT | Ollama model name used (null when failed) |
+| completed_at | TEXT | UTC timestamp when done/failed |
 
 Helper functions in `app/database.py`:
-- `create_pending_analysis(event_id)` -- INSERT OR IGNORE with status=pending.
 - `get_analysis(event_id)` -- single event lookup.
 - `get_analyses_for_events(event_ids)` -- batch lookup, returns dict keyed by event_id.
-- `update_analysis(event_id, status, analysis, model)` -- sets status, text, model, completed_at.
+- `update_analysis(event_id, status, analysis, model)` -- upserts: updates existing row or inserts new one.
 - `get_event_by_id(event_id)` -- returns event row (id, timestamp, event_type).
-- `get_pending_analyses()` -- returns list of pending analysis records with event_id, created_at, event_timestamp, ordered by created_at (queue order).
-- `get_intrusion_event_ids_without_analysis(max_age_days)` -- LEFT JOIN to find events missing analysis rows, optionally bounded by age.
+- `get_intrusion_event_ids_without_analysis(max_age_days)` -- events with no analysis row or status='failed' (for backfill on startup; failed are retried).
 
 ## AnalysisWorker (app/analysis.py)
 
-- Single daemon thread, `queue.Queue[int]`, `threading.Event` for stop.
-- `get_queue_size()`: returns approximate number of event IDs in the in-memory queue.
-- `enqueue(event_id)`: creates pending DB row, puts id on queue.
+- Single daemon thread, `queue.Queue[int]`, in-memory `_queue_contents` (list of {event_id, created_at}) for API, `threading.Event` for stop.
+- `get_queue_size()` / `get_queue_contents()`: return count and snapshot of in-memory queue (no DB).
+- `enqueue(event_id)`: adds to in-memory queue only; skips if already queued.
 - `start()`: launches thread, then calls `_backfill()`.
-- `_backfill()`: queues intrusion events from last 7 days that have no analysis row.
+- `_backfill()`: in-memory queue only; enqueues intrusion events from last 7 days that have no analysis or have failed analysis.
 - `_process_one(event_id)`: polls for snapshot via `match_media_for_events()`, loads image with PIL, resizes to max width 1024px (configurable), encodes as JPEG and base64, calls Ollama `/api/chat`, stores result.
 - Snapshot polling sleeps 2s between checks up to `ANALYSIS_SNAPSHOT_WAIT`.
 - On any failure (no snapshot, API error, timeout), marks analysis as `failed`.
@@ -73,8 +70,8 @@ Requires a vision-capable model (e.g. `moondream`, `llava`, `qwen3-vl`). Text-on
 ## API endpoints
 
 - `GET /api/intrusions?date=YYYY-MM-DD` -- enriched response includes `analysis_status`, `analysis`, `analysis_model` per event (from `get_analyses_for_events`).
-- `GET /api/intrusions/analysis/queue` -- returns `{ pending: [{ event_id, created_at, event_timestamp }, ...], queue_size }` for items waiting for or in LLM analysis.
-- `GET /api/intrusions/analysis/{event_id}` -- returns `{event_id, status, analysis, model}`. If no analysis exists yet, enqueues the event for analysis and returns status `pending` (lazy trigger for old events).
+- `GET /api/intrusions/analysis/queue` -- returns `{ pending: [{ event_id, created_at, event_timestamp }, ...], queue_size }` from the in-memory queue (items waiting for LLM analysis).
+- `GET /api/intrusions/analysis/{event_id}` -- returns `{event_id, status, analysis, model}`. If no analysis exists yet (or previously failed), enqueues the event for analysis and returns status `pending` (lazy trigger).
 
 ## Frontend (app/static/index.html)
 
@@ -115,7 +112,8 @@ The `trafficstats` container joins the external `ollama` Docker network (hardcod
 
 - **Non-blocking**: `enqueue()` is fire-and-forget; the camera listener thread is never blocked by LLM inference.
 - **Single worker thread**: serializes Ollama calls to avoid overloading the GPU. Queue is unbounded.
-- **Backfill on startup**: events from the last 7 days without analysis are queued automatically.
+- **In-memory queue**: queue is not persisted; on restart it is repopulated from events without analysis or with failed analysis in the last 7 days.
+- **Backfill on startup**: events from the last 7 days with no analysis or with failed analysis are enqueued into the in-memory queue.
 - **Lazy trigger via API**: opening the modal for an old event (no analysis row) triggers analysis on demand.
 - **Snapshot polling**: the snapshot file may not exist yet when the event fires (camera FTP upload delay). The worker retries every 2s.
 - **Graceful failure**: if the snapshot never arrives or Ollama errors, the analysis is marked `failed` and the UI shows this.

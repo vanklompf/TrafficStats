@@ -69,14 +69,20 @@ def init_db():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS event_analysis (
             event_id INTEGER PRIMARY KEY,
-            status TEXT NOT NULL DEFAULT 'pending',
+            status TEXT NOT NULL DEFAULT 'done',
             analysis TEXT,
             model TEXT,
-            created_at TEXT NOT NULL,
             completed_at TEXT,
             FOREIGN KEY (event_id) REFERENCES events(id)
         )
     """)
+
+    # Migrate: remove queue persistence artifacts from older schema
+    conn.execute("DELETE FROM event_analysis WHERE status = 'pending'")
+    ea_cols = {row[1] for row in conn.execute("PRAGMA table_info(event_analysis)").fetchall()}
+    if "created_at" in ea_cols:
+        conn.execute("ALTER TABLE event_analysis DROP COLUMN created_at")
+
     conn.commit()
     logger.info("Database initialised at %s", DB_PATH)
 
@@ -420,23 +426,11 @@ def get_intrusion_dates() -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def create_pending_analysis(event_id: int) -> None:
-    """Insert a pending analysis record for the given intrusion event."""
-    conn = _get_conn()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute(
-        "INSERT OR IGNORE INTO event_analysis (event_id, status, created_at) "
-        "VALUES (?, 'pending', ?)",
-        (event_id, now),
-    )
-    conn.commit()
-
-
 def get_analysis(event_id: int) -> dict | None:
     """Return analysis record for one event, or None if none exists."""
     conn = _get_conn()
     row = conn.execute(
-        "SELECT event_id, status, analysis, model, created_at, completed_at "
+        "SELECT event_id, status, analysis, model, completed_at "
         "FROM event_analysis WHERE event_id = ?",
         (event_id,),
     ).fetchone()
@@ -447,7 +441,6 @@ def get_analysis(event_id: int) -> dict | None:
         "status": row["status"],
         "analysis": row["analysis"],
         "model": row["model"],
-        "created_at": row["created_at"],
         "completed_at": row["completed_at"],
     }
 
@@ -459,7 +452,7 @@ def get_analyses_for_events(event_ids: list[int]) -> dict[int, dict]:
     conn = _get_conn()
     placeholders = ",".join("?" * len(event_ids))
     rows = conn.execute(
-        "SELECT event_id, status, analysis, model, created_at, completed_at "
+        "SELECT event_id, status, analysis, model, completed_at "
         "FROM event_analysis WHERE event_id IN (" + placeholders + ")",
         event_ids,
     ).fetchall()
@@ -469,7 +462,6 @@ def get_analyses_for_events(event_ids: list[int]) -> dict[int, dict]:
             "status": row["status"],
             "analysis": row["analysis"],
             "model": row["model"],
-            "created_at": row["created_at"],
             "completed_at": row["completed_at"],
         }
         for row in rows
@@ -482,56 +474,35 @@ def update_analysis(
     analysis: str | None = None,
     model: str | None = None,
 ) -> None:
-    """Update an analysis record after completion or failure."""
+    """Store an analysis result (done or failed). Inserts if no row exists, updates otherwise."""
     conn = _get_conn()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    if status in ("done", "failed"):
+    cur = conn.execute(
+        "UPDATE event_analysis SET status = ?, analysis = ?, model = ?, completed_at = ? "
+        "WHERE event_id = ?",
+        (status, analysis, model, now, event_id),
+    )
+    if cur.rowcount == 0:
         conn.execute(
-            "UPDATE event_analysis SET status = ?, analysis = ?, model = ?, completed_at = ? "
-            "WHERE event_id = ?",
-            (status, analysis, model, now, event_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE event_analysis SET status = ? WHERE event_id = ?",
-            (status, event_id),
+            "INSERT INTO event_analysis (event_id, status, analysis, model, completed_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (event_id, status, analysis, model, now),
         )
     conn.commit()
 
 
-def get_pending_analyses() -> list[dict]:
-    """Return all pending analysis records with event timestamp, ordered by queue (created_at)."""
-    conn = _get_conn()
-    rows = conn.execute(
-        """
-        SELECT a.event_id, a.created_at, e.timestamp AS event_timestamp
-        FROM event_analysis a
-        JOIN events e ON e.id = a.event_id
-        WHERE a.status = 'pending'
-        ORDER BY a.created_at
-        """
-    ).fetchall()
-    return [
-        {
-            "event_id": row["event_id"],
-            "created_at": row["created_at"],
-            "event_timestamp": row["event_timestamp"],
-        }
-        for row in rows
-    ]
-
-
 def get_intrusion_event_ids_without_analysis(max_age_days: int | None = None) -> list[int]:
-    """Return intrusion event IDs that have no analysis record (for backfill).
+    """Return intrusion event IDs that have no analysis or have failed analysis (for backfill).
 
-    If max_age_days is set, only return events with timestamp within that many days
-    (e.g. 7 = only events from the last 7 days). Use None to get all such events.
+    Includes events with no event_analysis row and events with status='failed', so failed
+    analyses are requeued on startup. If max_age_days is set, only return events with
+    timestamp within that many days (e.g. 7 = last 7 days). Use None for all.
     """
     conn = _get_conn()
     sql = """
         SELECT e.id FROM events e
         LEFT JOIN event_analysis a ON e.id = a.event_id
-        WHERE e.event_type = 'intrusion' AND a.event_id IS NULL
+        WHERE e.event_type = 'intrusion' AND (a.event_id IS NULL OR a.status = 'failed')
     """
     params: tuple = ()
     if max_age_days is not None:

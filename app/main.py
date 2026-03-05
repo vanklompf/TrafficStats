@@ -27,7 +27,6 @@ from app.database import (
     get_analysis,
     get_analyses_for_events,
     get_event_by_id,
-    get_pending_analyses,
 )
 from app.dahua import DahuaListener, create_listener_from_env
 from app.analysis import AnalysisWorker
@@ -238,12 +237,23 @@ async def api_intrusion_dates():
 
 @app.get("/api/intrusions/analysis/queue")
 async def api_analysis_queue():
-    """Return list of events waiting for or currently in LLM analysis (pending), plus queue size."""
-    pending = get_pending_analyses()
-    queue_size = _analysis_worker.get_queue_size() if _analysis_worker is not None else 0
+    """Return list of events in the in-memory analysis queue (waiting for LLM), plus queue size."""
+    if _analysis_worker is None:
+        return JSONResponse(content={"pending": [], "queue_size": 0})
+    contents = _analysis_worker.get_queue_contents()
+    pending = []
+    for item in contents:
+        event = get_event_by_id(item["event_id"])
+        if event is None:
+            continue
+        pending.append({
+            "event_id": item["event_id"],
+            "created_at": item["created_at"],
+            "event_timestamp": event["timestamp"],
+        })
     return JSONResponse(content={
         "pending": pending,
-        "queue_size": queue_size,
+        "queue_size": len(pending),
     })
 
 
@@ -251,11 +261,11 @@ async def api_analysis_queue():
 async def api_intrusion_analysis(event_id: int):
     """Return analysis status and text for an intrusion event.
 
-    If no analysis exists yet, enqueues the event for LLM description generation
-    (for older events not backfilled on startup) and returns status 'pending'.
+    If no analysis exists yet (or the previous attempt failed), enqueues the
+    event for LLM description generation and returns status 'pending'.
     """
     analysis = get_analysis(event_id)
-    if analysis is not None:
+    if analysis is not None and analysis["status"] != "failed":
         return JSONResponse(content={
             "event_id": analysis["event_id"],
             "status": analysis["status"],
