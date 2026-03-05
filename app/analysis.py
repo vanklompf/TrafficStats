@@ -71,12 +71,12 @@ class AnalysisWorker:
     def start(self) -> None:
         """Start the worker thread (daemon)."""
         if self._thread is not None and self._thread.is_alive():
-            logger.warning("Analysis worker already running")
+            logger.warning("[AI] Analysis worker already running")
             return
         self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        logger.info("Analysis worker started (Ollama: %s, model: %s)", OLLAMA_HOST, OLLAMA_MODEL)
+        logger.info("[AI] Analysis worker started (Ollama: %s, model: %s)", OLLAMA_HOST, OLLAMA_MODEL)
         self._backfill()
 
     def stop(self) -> None:
@@ -84,7 +84,7 @@ class AnalysisWorker:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
-        logger.info("Analysis worker stopped")
+        logger.info("[AI] Analysis worker stopped")
 
     def _backfill(self) -> None:
         """Queue intrusion events from the last 7 days that have no analysis (no catch-up for older)."""
@@ -94,9 +94,9 @@ class AnalysisWorker:
                 create_pending_analysis(event_id)
                 self._queue.put_nowait(event_id)
             if ids:
-                logger.info("Backfill: queued %d intrusion event(s) for analysis", len(ids))
+                logger.info("[AI] Backfill: queued %d intrusion event(s) for analysis", len(ids))
         except Exception as e:
-            logger.exception("Backfill failed: %s", e)
+            logger.exception("[AI] Backfill failed: %s", e)
 
     def _run(self) -> None:
         """Process the queue until stopped."""
@@ -112,7 +112,7 @@ class AnalysisWorker:
         event = get_event_by_id(event_id)
         if event is None or event.get("event_type") != "intrusion":
             ts = event["timestamp"] if event else "?"
-            logger.debug("Event %s (%s) not found or not intrusion, skipping", event_id, ts)
+            logger.debug("[AI] Event %s (%s) not found or not intrusion, skipping", event_id, ts)
             return
 
         timestamp = event["timestamp"]
@@ -132,7 +132,7 @@ class AnalysisWorker:
             time.sleep(2)
 
         if snapshot_path is None or not snapshot_path.is_file():
-            logger.warning("No snapshot found for event %s (%s) within %ds", event_id, timestamp, ANALYSIS_SNAPSHOT_WAIT)
+            logger.warning("[AI] No snapshot found for event %s (%s) within %ds", event_id, timestamp, ANALYSIS_SNAPSHOT_WAIT)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
 
@@ -145,18 +145,18 @@ class AnalysisWorker:
                     new_w = ANALYSIS_SNAPSHOT_MAX_WIDTH
                     new_h = int(h * ratio)
                     img = img.resize((new_w, new_h), Image.LANCZOS)
-                    logger.debug("Resized snapshot for LLM: %dx%d -> %dx%d", w, h, new_w, new_h)
+                    logger.debug("[AI] Resized snapshot for LLM: %dx%d -> %dx%d", w, h, new_w, new_h)
                 if img.mode not in ("RGB", "L"):
                     img = img.convert("RGB")
                 buf = io.BytesIO()
                 img.save(buf, "JPEG", quality=85, optimize=True)
                 image_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
         except OSError as e:
-            logger.warning("Cannot read snapshot for event %s (%s): %s", event_id, timestamp, e)
+            logger.warning("[AI] Cannot read snapshot for event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
         except Exception as e:
-            logger.warning("Cannot process snapshot for event %s (%s): %s", event_id, timestamp, e)
+            logger.warning("[AI] Cannot process snapshot for event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
 
@@ -178,11 +178,11 @@ class AnalysisWorker:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPStatusError as e:
-            logger.warning("Ollama API error for event %s (%s): %s %s", event_id, timestamp, e.response.status_code, e.response.text)
+            logger.warning("[AI] Ollama API error for event %s (%s): %s %s", event_id, timestamp, e.response.status_code, e.response.text)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
         except Exception as e:
-            logger.exception("Ollama request failed for event %s (%s): %s", event_id, timestamp, e)
+            logger.exception("[AI] Ollama request failed for event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
 
@@ -190,4 +190,4 @@ class AnalysisWorker:
         content = message.get("content") or ""
         model_used = data.get("model") or OLLAMA_MODEL
         update_analysis(event_id, "done", analysis=content.strip() or None, model=model_used)
-        logger.info("Analysis done for event %s (%s) (model: %s)", event_id, timestamp, model_used)
+        logger.info("[AI] Analysis done for event %s (%s) (model: %s)", event_id, timestamp, model_used)
