@@ -172,6 +172,7 @@ class AnalysisWorker:
             ],
         }
 
+        t0 = time.monotonic()
         try:
             with httpx.Client(timeout=OLLAMA_TIMEOUT) as client:
                 resp = client.post(f"{OLLAMA_HOST.rstrip('/')}/api/chat", json=payload)
@@ -185,9 +186,10 @@ class AnalysisWorker:
             logger.exception("[AI] Ollama request failed for event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
+        elapsed = time.monotonic() - t0
 
         message = data.get("message") or {}
         content = message.get("content") or ""
         model_used = data.get("model") or OLLAMA_MODEL
         update_analysis(event_id, "done", analysis=content.strip() or None, model=model_used)
-        logger.info("[AI] Analysis done for event %s (%s) (model: %s)", event_id, timestamp, model_used)
+        logger.info("[AI] Analysis done for event %s (%s) (model: %s, %.1fs)", event_id, timestamp, model_used, elapsed)
