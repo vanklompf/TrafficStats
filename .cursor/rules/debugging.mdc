@@ -1,0 +1,50 @@
+---
+description: Debugging guidelines for the TrafficStats Docker application.
+alwaysApply: true
+---
+
+# Debugging TrafficStats
+
+When asked to debug, diagnose, or investigate issues with TrafficStats:
+
+## 1. Check container logs
+
+```bash
+docker logs trafficstats --tail 200
+```
+
+Use `--since 5m` or `--since 1h` for time-scoped output. The app uses Python `logging` at the level set by `LOG_LEVEL` (default `INFO`).
+
+## 2. Check container status
+
+```bash
+docker ps -a --filter name=trafficstats
+```
+
+## 3. Shell into the container
+
+```bash
+docker exec -it trafficstats bash
+```
+
+The app runs as `appuser` (UID/GID from `PUID`/`PGID`). Data is at `/data` (SQLite DB), media at `/media` (read-only camera FTP uploads).
+
+## 4. Inspect the database
+
+```bash
+docker exec trafficstats sqlite3 /data/trafficstats.db ".tables"
+docker exec trafficstats sqlite3 /data/trafficstats.db "SELECT * FROM events ORDER BY id DESC LIMIT 10;"
+```
+
+## 5. Common issues
+
+- **Ollama errors**: container joins the external `ollama` Docker network; check `docker logs ollama` and connectivity to `http://ollama:11434`.
+- **Dahua camera connection**: check `DAHUA_HOST`, `DAHUA_PORT`, `DAHUA_USER`, `DAHUA_PASS` in `.env`.
+- **Missing snapshots/media**: verify `MEDIA_HOST_PATH` mount and FTP uploads from the camera.
+- **HW accel failures**: check `/dev/dri` device availability; set `VIDEO_HW_ACCEL=off` to disable.
+
+## 6. Restart
+
+```bash
+docker compose --env-file .env up -d
+```
