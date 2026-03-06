@@ -319,9 +319,11 @@ async def api_intrusions(date: str = Query(default="")):
             ev["thumbnail_url"] = None
         if ev["video"]:
             ev["video_url"] = f"/media/video/{vid_date}/{ev['video']}"
+            ev["video_path"] = str(Path(MEDIA_PATH) / vid_date / ev["video"])
             ev["video_cached"] = is_video_cached(vid_date, ev["video"])
         else:
             ev["video_url"] = None
+            ev["video_path"] = None
             ev["video_cached"] = False
 
     return JSONResponse(content={

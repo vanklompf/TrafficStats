@@ -407,8 +407,43 @@
       font-size: .85rem;
       color: var(--text-dim);
       display: flex;
+      flex-direction: column;
+      gap: .25rem;
+    }
+    .modal-info-row {
+      display: flex;
       align-items: center;
       justify-content: space-between;
+    }
+    .modal-path-row {
+      display: flex;
+      align-items: baseline;
+      gap: .3rem;
+      flex-wrap: wrap;
+    }
+    .modal-path {
+      font-size: .75rem;
+      font-family: ui-monospace, monospace;
+      word-break: break-all;
+      color: var(--text-dim);
+      opacity: .9;
+    }
+    .modal-path-copy {
+      flex-shrink: 0;
+      padding: .25rem;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--surface);
+      color: var(--text-dim);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 0;
+    }
+    .modal-path-copy:hover {
+      background: var(--bg);
+      color: var(--text);
     }
 
     .modal-close {
@@ -667,8 +702,14 @@
       <div id="modal-body"></div>
       <div class="modal-analysis" id="modal-analysis" style="display: none;"></div>
       <div class="modal-info">
-        <span id="modal-time"></span>
-        <a id="modal-download" href="#" download style="color:var(--accent);font-size:.8rem;text-decoration:none;">Download</a>
+        <div class="modal-info-row">
+          <span id="modal-time"></span>
+          <a id="modal-download" href="#" download style="color:var(--accent);font-size:.8rem;text-decoration:none;">Download</a>
+        </div>
+        <div id="modal-path-row" class="modal-path-row" style="display:none;">
+          <span id="modal-path" class="modal-path"></span>
+          <button type="button" class="modal-path-copy" id="modal-path-copy" title="Copy path to clipboard"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+        </div>
       </div>
     </div>
   </div>
@@ -1194,6 +1235,9 @@
     const modalAnalysisEl = document.getElementById('modal-analysis');
     const modalTime = document.getElementById('modal-time');
     const modalDownload = document.getElementById('modal-download');
+    const modalPath = document.getElementById('modal-path');
+    const modalPathRow = document.getElementById('modal-path-row');
+    const modalPathCopyBtn = document.getElementById('modal-path-copy');
     const modalCloseBtn = document.getElementById('modal-close');
     let modalAnalysisPollId = null;
 
@@ -1252,6 +1296,13 @@
         modalDownload.href = ev.video_url;
         modalDownload.style.display = '';
         modalDownload.textContent = 'Download video';
+        if (ev.video_path) {
+          modalPath.textContent = ev.video_path;
+          modalPathRow.style.display = 'flex';
+        } else {
+          modalPath.textContent = '';
+          modalPathRow.style.display = 'none';
+        }
       } else if (ev.snapshot_url) {
         const img = document.createElement('img');
         img.className = 'modal-snapshot';
@@ -1261,9 +1312,11 @@
         modalDownload.href = ev.snapshot_url;
         modalDownload.style.display = '';
         modalDownload.textContent = 'Download snapshot';
+        modalPathRow.style.display = 'none';
       } else {
         modalBody.innerHTML = '<div class="modal-no-media">No media available for this event</div>';
         modalDownload.style.display = 'none';
+        modalPathRow.style.display = 'none';
       }
 
       renderModalAnalysis(ev);
@@ -1296,6 +1349,17 @@
       const vid = modalBody.querySelector('video');
       if (vid) { vid.pause(); vid.src = ''; }
     }
+
+    const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const checkIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+    modalPathCopyBtn.addEventListener('click', () => {
+      const path = modalPath.textContent;
+      if (!path) return;
+      navigator.clipboard.writeText(path).then(() => {
+        modalPathCopyBtn.innerHTML = checkIcon;
+        setTimeout(() => { modalPathCopyBtn.innerHTML = copyIcon; }, 1500);
+      }).catch(() => {});
+    });
 
     modalCloseBtn.addEventListener('click', closeModal);
     modalOverlay.addEventListener('click', (e) => {
