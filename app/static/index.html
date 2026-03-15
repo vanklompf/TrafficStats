@@ -446,6 +446,31 @@
       color: var(--text);
     }
 
+    .modal-link-btn {
+      flex-shrink: 0;
+      padding: .3rem .6rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text-dim);
+      cursor: pointer;
+      font-size: .75rem;
+      display: inline-flex;
+      align-items: center;
+      gap: .3rem;
+      transition: all .15s ease;
+      text-decoration: none;
+    }
+    .modal-link-btn:hover {
+      background: var(--bg);
+      color: var(--text);
+      border-color: var(--accent);
+    }
+    .modal-link-btn.copied {
+      color: #34d399;
+      border-color: #34d399;
+    }
+
     .modal-close {
       position: absolute;
       top: .5rem;
@@ -704,7 +729,10 @@
       <div class="modal-info">
         <div class="modal-info-row">
           <span id="modal-time"></span>
-          <a id="modal-download" href="#" download style="color:var(--accent);font-size:.8rem;text-decoration:none;">Download</a>
+          <span style="display:flex;gap:.5rem;align-items:center;">
+            <button type="button" class="modal-link-btn" id="modal-share-btn" title="Copy link to this event"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Link</button>
+            <a id="modal-download" href="#" download style="color:var(--accent);font-size:.8rem;text-decoration:none;">Download</a>
+          </span>
         </div>
         <div id="modal-path-row" class="modal-path-row" style="display:none;">
           <span id="modal-path" class="modal-path"></span>
@@ -722,26 +750,31 @@
     let trafficDate = new Date().toISOString().slice(0, 10);
     let chart = null;
     let currentTab = 'intrusions';
+    let currentModalEventId = null;
+    let suppressHashChange = false;
 
     // -----------------------------------------------------------------------
     // Tab switching
     // -----------------------------------------------------------------------
+    function switchTab(tab, updateHash = true) {
+      document.querySelector('.tab-btn.active').classList.remove('active');
+      document.querySelector(`.tab-btn[data-tab="${tab}"]`).classList.add('active');
+      document.querySelector('.tab-content.active').classList.remove('active');
+      document.getElementById('tab-' + tab).classList.add('active');
+      if (currentTab === 'live' && tab !== 'live') stopLiveStream();
+      currentTab = tab;
+      if (tab === 'intrusions') {
+        loadIntrusions();
+      } else if (tab === 'traffic') {
+        fetchData();
+      } else if (tab === 'live') {
+        startLiveStream();
+      }
+    }
+
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        document.querySelector('.tab-btn.active').classList.remove('active');
-        btn.classList.add('active');
-        document.querySelector('.tab-content.active').classList.remove('active');
-        const tab = btn.dataset.tab;
-        document.getElementById('tab-' + tab).classList.add('active');
-        if (currentTab === 'live' && tab !== 'live') stopLiveStream();
-        currentTab = tab;
-        if (tab === 'intrusions') {
-          loadIntrusions();
-        } else if (tab === 'traffic') {
-          fetchData();
-        } else if (tab === 'live') {
-          startLiveStream();
-        }
+        switchTab(btn.dataset.tab);
       });
     });
 
@@ -1126,6 +1159,12 @@
       clampToToday();
       dateStr = dateInput.value;
 
+      if (!location.hash.startsWith('#/event/')) {
+        suppressHashChange = true;
+        history.replaceState(null, '', '#/intrusions/' + dateStr);
+        suppressHashChange = false;
+      }
+
       eventsGrid.innerHTML = '<div class="empty-state">Loading...</div>';
 
       try {
@@ -1267,7 +1306,13 @@
     }
 
     async function openModal(ev, cameraTimezone) {
-      // Request analysis for older events that have none (triggers generation on open)
+      currentModalEventId = ev.id || null;
+      if (currentModalEventId) {
+        suppressHashChange = true;
+        location.hash = '#/event/' + currentModalEventId;
+        suppressHashChange = false;
+      }
+
       if (!ev.analysis_status && ev.id) {
         try {
           const r = await fetch('/api/intrusions/analysis/' + ev.id);
@@ -1290,6 +1335,7 @@
         const video = document.createElement('video');
         video.controls = true;
         video.autoplay = true;
+        video.muted = true;
         video.preload = 'auto';
         video.src = ev.video_url;
         modalBody.appendChild(video);
@@ -1340,14 +1386,20 @@
     }
 
     function closeModal() {
+      currentModalEventId = null;
       if (modalAnalysisPollId) {
         clearInterval(modalAnalysisPollId);
         modalAnalysisPollId = null;
       }
       modalOverlay.classList.remove('open');
-      // Stop any playing video
       const vid = modalBody.querySelector('video');
       if (vid) { vid.pause(); vid.src = ''; }
+      if (location.hash.startsWith('#/event/')) {
+        suppressHashChange = true;
+        const dateStr = dateInput.value;
+        history.replaceState(null, '', '#/intrusions/' + dateStr);
+        suppressHashChange = false;
+      }
     }
 
     const copyIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
@@ -1429,6 +1481,79 @@
     });
 
     // -----------------------------------------------------------------------
+    // Share / copy link button
+    // -----------------------------------------------------------------------
+    const modalShareBtn = document.getElementById('modal-share-btn');
+    const linkIconSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>';
+
+    modalShareBtn.addEventListener('click', () => {
+      if (!currentModalEventId) return;
+      const url = location.origin + '/#/event/' + currentModalEventId;
+      navigator.clipboard.writeText(url).then(() => {
+        modalShareBtn.innerHTML = checkIcon + 'Copied!';
+        modalShareBtn.classList.add('copied');
+        setTimeout(() => {
+          modalShareBtn.innerHTML = linkIconSvg + 'Link';
+          modalShareBtn.classList.remove('copied');
+        }, 1500);
+      }).catch(() => {});
+    });
+
+    // -----------------------------------------------------------------------
+    // Hash-based routing
+    // -----------------------------------------------------------------------
+    async function handleHashRoute() {
+      const hash = location.hash;
+      if (!hash || hash === '#') return false;
+
+      // #/event/{id} — open a specific intrusion event modal
+      const eventMatch = hash.match(/^#\/event\/(\d+)$/);
+      if (eventMatch) {
+        const eventId = parseInt(eventMatch[1], 10);
+        try {
+          const resp = await fetch('/api/intrusions/event/' + eventId);
+          if (!resp.ok) return false;
+          const data = await resp.json();
+          const ev = data.event;
+          const tz = data.timezone || 'UTC';
+          if (currentTab !== 'intrusions') switchTab('intrusions', false);
+          dateInput.value = data.date;
+          updateWeekdayLabel();
+          loadIntrusions();
+          openModal(ev, tz);
+          return true;
+        } catch (_) {
+          return false;
+        }
+      }
+
+      // #/intrusions/{date} — navigate to intrusions for a specific date
+      const dateMatch = hash.match(/^#\/intrusions\/(\d{4}-\d{2}-\d{2})$/);
+      if (dateMatch) {
+        const dateStr = dateMatch[1];
+        if (currentTab !== 'intrusions') switchTab('intrusions', false);
+        dateInput.value = dateStr;
+        updateWeekdayLabel();
+        loadIntrusions();
+        return true;
+      }
+
+      // #/video/{date}/{filename} — direct link to a video (redirect)
+      const videoMatch = hash.match(/^#\/video\/(\d{4}-\d{2}-\d{2})\/(.+)$/);
+      if (videoMatch) {
+        location.href = '/media/video/' + videoMatch[1] + '/' + videoMatch[2];
+        return true;
+      }
+
+      return false;
+    }
+
+    window.addEventListener('hashchange', () => {
+      if (suppressHashChange) return;
+      handleHashRoute();
+    });
+
+    // -----------------------------------------------------------------------
     // Init
     // -----------------------------------------------------------------------
     initChart();
@@ -1436,7 +1561,11 @@
     setInterval(() => {
       if (currentTab === 'traffic') fetchData();
     }, 60_000);
-    loadIntrusions();
+
+    // Handle initial hash route, or fall back to loading today's intrusions
+    handleHashRoute().then(handled => {
+      if (!handled) loadIntrusions();
+    });
   </script>
 </body>
 </html>

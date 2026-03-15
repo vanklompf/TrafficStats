@@ -285,6 +285,51 @@ async def api_intrusion_analysis(event_id: int):
     })
 
 
+@app.get("/api/intrusions/event/{event_id}")
+async def api_intrusion_event(event_id: int):
+    """Return a single intrusion event with media URLs and analysis."""
+    event = get_event_by_id(event_id)
+    if event is None or event.get("event_type") != "intrusion":
+        raise HTTPException(status_code=404, detail="Intrusion event not found")
+
+    ts = event["timestamp"]
+    date_str = ts[:10]
+    events = [{"id": event["id"], "timestamp": ts}]
+    enriched = match_media_for_events(events, date_str)
+    if not enriched:
+        raise HTTPException(status_code=404, detail="Intrusion event not found")
+
+    ev = enriched[0]
+
+    analysis = get_analysis(event_id)
+    ev["analysis_status"] = analysis["status"] if analysis else None
+    ev["analysis"] = analysis["analysis"] if analysis else None
+    ev["analysis_model"] = analysis["model"] if analysis else None
+
+    snap_date = ev.get("snapshot_date") or date_str
+    vid_date = ev.get("video_date") or date_str
+    if ev["snapshot"]:
+        ev["snapshot_url"] = f"/media/snapshot/{snap_date}/{ev['snapshot']}"
+        ev["thumbnail_url"] = f"/media/thumbnail/{snap_date}/{ev['snapshot']}"
+    else:
+        ev["snapshot_url"] = None
+        ev["thumbnail_url"] = None
+    if ev["video"]:
+        ev["video_url"] = f"/media/video/{vid_date}/{ev['video']}"
+        ev["video_path"] = str(Path(MEDIA_PATH) / vid_date / ev["video"])
+        ev["video_cached"] = is_video_cached(vid_date, ev["video"])
+    else:
+        ev["video_url"] = None
+        ev["video_path"] = None
+        ev["video_cached"] = False
+
+    return JSONResponse(content={
+        "event": ev,
+        "date": date_str,
+        "timezone": get_camera_timezone_name(),
+    })
+
+
 @app.get("/api/intrusions")
 async def api_intrusions(date: str = Query(default="")):
     """
