@@ -38,25 +38,42 @@ _DAV_RE = re.compile(
 
 
 def discover_videos(media_path: str, max_videos: int) -> list[Path]:
-    """Find DAV files under date-organised subdirectories, newest first."""
+    """Find DAV/MP4 files in *media_path*.
+
+    Looks in date-organised subdirectories (YYYY-MM-DD/) first, then falls
+    back to files directly in the given directory.  Returns newest first,
+    limited to *max_videos*.
+    """
     root = Path(media_path)
     if not root.is_dir():
         _err(f"Media path does not exist: {root}")
         return []
 
-    dav_files: list[tuple[str, Path]] = []
+    VIDEO_RE = re.compile(r".*\.(dav|mp4)$", re.IGNORECASE)
+
+    found: list[Path] = []
+
+    # 1) Date-organised subdirectories (camera FTP layout)
     for date_dir in sorted(root.iterdir(), reverse=True):
         if not date_dir.is_dir() or not re.match(r"\d{4}-\d{2}-\d{2}$", date_dir.name):
             continue
         for f in sorted(date_dir.iterdir(), reverse=True):
-            if _DAV_RE.match(f.name):
-                dav_files.append((date_dir.name, f))
-            if len(dav_files) >= max_videos:
+            if VIDEO_RE.match(f.name):
+                found.append(f)
+            if len(found) >= max_videos:
                 break
-        if len(dav_files) >= max_videos:
+        if len(found) >= max_videos:
             break
 
-    return [p for _, p in dav_files]
+    # 2) Flat directory (files placed directly in the path)
+    if not found:
+        for f in sorted(root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if f.is_file() and VIDEO_RE.match(f.name):
+                found.append(f)
+            if len(found) >= max_videos:
+                break
+
+    return found
 
 
 def convert_dav_to_mp4(dav_path: Path, output_dir: Path) -> Path | None:
@@ -117,29 +134,83 @@ def extract_frames_interval(video: Path, out_dir: Path, interval: float) -> list
     return sorted(out_dir.glob("frame_*.jpg"))
 
 
-def extract_frames_scene(video: Path, out_dir: Path, threshold: float) -> list[Path]:
-    """Extract frames at scene changes above *threshold* (0-1)."""
-    pattern = str(out_dir / "frame_%04d.jpg")
-    vf = f"select='gt(scene\\,{threshold})',setpts=N/FRAME_RATE/TB"
+def _compute_frame_diff(img1: Image.Image, img2: Image.Image) -> float:
+    """Return normalised mean pixel difference (0.0 – 1.0) between two images."""
+    from PIL import ImageChops
+
+    g1 = img1.convert("L")
+    g2 = img2.convert("L")
+    if g1.size != g2.size:
+        g2 = g2.resize(g1.size, Image.LANCZOS)
+
+    diff = ImageChops.difference(g1, g2)
+    hist = diff.histogram()
+    total_pixels = g1.size[0] * g1.size[1]
+    mean_diff = sum(i * count for i, count in enumerate(hist)) / total_pixels
+    return mean_diff / 255.0
+
+
+def extract_frames_motion(
+    video: Path,
+    out_dir: Path,
+    threshold: float,
+    sample_rate: float = 0.5,
+) -> list[Path]:
+    """Extract frames where pixel-level change exceeds *threshold* (0-1).
+
+    Candidate frames are sampled every *sample_rate* seconds.  Each candidate
+    is compared to the last *kept* frame; if the average pixel difference
+    (normalised to 0-1) exceeds *threshold*, the candidate is kept.  The first
+    frame is always kept.
+    """
+    candidates_dir = out_dir / "_candidates"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(candidates_dir / "cand_%06d.jpg")
     cmd = [
         "ffmpeg", "-i", str(video),
-        "-vf", vf,
-        "-vsync", "vfr",
+        "-vf", f"fps=1/{sample_rate}",
         "-q:v", "2",
         pattern,
     ]
     _run_ffmpeg(cmd)
-    frames = sorted(out_dir.glob("frame_*.jpg"))
-    if not frames:
-        # Scene detection found no changes; grab at least the first frame
-        cmd_first = [
-            "ffmpeg", "-i", str(video),
-            "-frames:v", "1", "-q:v", "2",
-            str(out_dir / "frame_0001.jpg"),
-        ]
-        _run_ffmpeg(cmd_first)
-        frames = sorted(out_dir.glob("frame_*.jpg"))
-    return frames
+
+    candidate_paths = sorted(candidates_dir.glob("cand_*.jpg"))
+    if not candidate_paths:
+        return []
+
+    kept: list[Path] = []
+    ref_img: Image.Image | None = None
+    frame_idx = 0
+
+    for cp in candidate_paths:
+        try:
+            img = Image.open(cp)
+            img.load()
+        except Exception as e:
+            _err(f"Cannot open candidate frame {cp.name}: {e}")
+            continue
+
+        if ref_img is None:
+            dst = out_dir / f"frame_{frame_idx:04d}.jpg"
+            cp.rename(dst)
+            kept.append(dst)
+            ref_img = img
+            frame_idx += 1
+            continue
+
+        diff = _compute_frame_diff(ref_img, img)
+        if diff >= threshold:
+            dst = out_dir / f"frame_{frame_idx:04d}.jpg"
+            cp.rename(dst)
+            kept.append(dst)
+            ref_img = img
+            frame_idx += 1
+
+    _info(
+        f"  Motion filter: {len(candidate_paths)} candidates -> "
+        f"{len(kept)} kept (threshold={threshold}, sample_rate={sample_rate}s)"
+    )
+    return kept
 
 
 def extract_frames_keyframe(video: Path, out_dir: Path) -> list[Path]:
@@ -238,6 +309,7 @@ def call_ollama(
     prompt: str,
     images_b64: list[str],
     timeout: float,
+    num_ctx: int | None = None,
 ) -> dict:
     """Send images to Ollama and return parsed result dict."""
     payload = {
@@ -251,6 +323,8 @@ def call_ollama(
             }
         ],
     }
+    if num_ctx is not None:
+        payload["options"] = {"num_ctx": num_ctx}
 
     url = f"{host.rstrip('/')}/api/chat"
     t0 = time.monotonic()
@@ -389,13 +463,16 @@ def build_test_matrix(args: argparse.Namespace) -> list[dict]:
                             "method": "interval",
                             "method_params": {"interval": interval},
                         })
-                elif method == "scene":
-                    for threshold in args.scene_thresholds:
+                elif method == "motion":
+                    for threshold in args.motion_thresholds:
                         matrix.append({
                             "model": model,
                             "width": width,
-                            "method": "scene",
-                            "method_params": {"threshold": threshold},
+                            "method": "motion",
+                            "method_params": {
+                                "threshold": threshold,
+                                "sample_rate": args.motion_sample_rate,
+                            },
                         })
                 elif method == "keyframe":
                     matrix.append({
@@ -429,6 +506,7 @@ def run_single_test(
     ollama_host: str,
     ollama_timeout: float,
     work_dir: Path,
+    num_ctx: int | None = None,
 ) -> dict:
     """Run a single extraction + analysis test, return result dict."""
     method = config["method"]
@@ -449,8 +527,10 @@ def run_single_test(
 
     if method == "interval":
         frames = extract_frames_interval(video_path, frame_dir, params["interval"])
-    elif method == "scene":
-        frames = extract_frames_scene(video_path, frame_dir, params["threshold"])
+    elif method == "motion":
+        frames = extract_frames_motion(
+            video_path, frame_dir, params["threshold"], params.get("sample_rate", 0.5),
+        )
     elif method == "keyframe":
         frames = extract_frames_keyframe(video_path, frame_dir)
     elif method == "uniform":
@@ -494,7 +574,7 @@ def run_single_test(
         result["error"] = "All frames failed to encode"
         return result
 
-    llm_result = call_ollama(ollama_host, model, prompt, images_b64, ollama_timeout)
+    llm_result = call_ollama(ollama_host, model, prompt, images_b64, ollama_timeout, num_ctx)
 
     result["response"] = llm_result.get("response")
     result["model"] = llm_result.get("model_used", model)
@@ -549,7 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
 examples:
   %(prog)s --media-path /media
   %(prog)s --videos /path/to/clip.dav --models qwen3-vl:8b,llava:13b
-  %(prog)s --media-path /media --methods interval,scene --widths 512,1024
+  %(prog)s --media-path /media --methods interval,motion --widths 512,1024
   %(prog)s --media-path /media --dry-run
 """,
     )
@@ -568,18 +648,22 @@ examples:
                     help="Max videos to test when using --media-path (default: 3).")
     p.add_argument("--models", type=str, default="qwen3-vl:8b",
                     help="Comma-separated Ollama model names (default: qwen3-vl:8b).")
-    p.add_argument("--methods", type=str, default="interval,scene,keyframe,uniform",
+    p.add_argument("--methods", type=str, default="interval,motion,keyframe,uniform",
                     help="Comma-separated extraction methods (default: all four).")
     p.add_argument("--intervals", type=str, default="1,2,5",
                     help="Comma-separated intervals in seconds for 'interval' method (default: 1,2,5).")
-    p.add_argument("--scene-thresholds", type=str, default="0.2,0.3,0.5",
-                    help="Comma-separated thresholds for 'scene' method (default: 0.2,0.3,0.5).")
+    p.add_argument("--motion-thresholds", type=str, default="0.01,0.02,0.05",
+                    help="Comma-separated pixel-diff thresholds (0-1) for 'motion' method (default: 0.01,0.02,0.05).")
+    p.add_argument("--motion-sample-rate", type=float, default=0.5,
+                    help="Candidate frame sampling interval in seconds for 'motion' method (default: 0.5).")
     p.add_argument("--frame-counts", type=str, default="3,5,10",
                     help="Comma-separated frame counts for 'uniform' method (default: 3,5,10).")
     p.add_argument("--widths", type=str, default="512,768,1024",
                     help="Comma-separated max image widths in px (default: 512,768,1024).")
     p.add_argument("--prompt", type=str, default=DEFAULT_PROMPT,
                     help="Prompt sent to the vision model.")
+    p.add_argument("--num-ctx", type=int, default=None,
+                    help="Context window size (num_ctx) for Ollama. If not set, uses the model default.")
     p.add_argument("--ollama-host", type=str, default="http://localhost:11434",
                     help="Ollama API base URL (default: http://localhost:11434).")
     p.add_argument("--ollama-timeout", type=float, default=600,
@@ -600,11 +684,11 @@ def main() -> None:
     args.models = parse_csv_str(args.models)
     args.methods = parse_csv_str(args.methods)
     args.intervals = parse_csv_float(args.intervals)
-    args.scene_thresholds = parse_csv_float(args.scene_thresholds)
+    args.motion_thresholds = parse_csv_float(args.motion_thresholds)
     args.frame_counts = parse_csv_int(args.frame_counts)
     args.widths = parse_csv_int(args.widths)
 
-    valid_methods = {"interval", "scene", "keyframe", "uniform"}
+    valid_methods = {"interval", "motion", "keyframe", "uniform"}
     for m in args.methods:
         if m not in valid_methods:
             parser.error(f"Unknown method '{m}'. Choose from: {', '.join(sorted(valid_methods))}")
@@ -693,6 +777,7 @@ def main() -> None:
                     ollama_host=args.ollama_host,
                     ollama_timeout=args.ollama_timeout,
                     work_dir=work_dir,
+                    num_ctx=args.num_ctx,
                 )
                 all_results.append(result)
 
@@ -707,10 +792,12 @@ def main() -> None:
             "methods": args.methods,
             "widths": args.widths,
             "intervals": args.intervals,
-            "scene_thresholds": args.scene_thresholds,
+            "motion_thresholds": args.motion_thresholds,
+            "motion_sample_rate": args.motion_sample_rate,
             "frame_counts": args.frame_counts,
             "prompt": args.prompt,
             "ollama_host": args.ollama_host,
+            "num_ctx": args.num_ctx,
         },
         "results": all_results,
     }
