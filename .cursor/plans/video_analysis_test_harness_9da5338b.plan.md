@@ -41,7 +41,7 @@ The script supports four extraction methods:
 - `**interval**` -- Extract one frame every N seconds via ffmpeg `-vf "fps=1/N"`. Configurable interval (defaults: 1, 2, 5 s). Simple and predictable.
 - `**motion**` -- Pixel-level change detection (replaces the originally planned ffmpeg scene filter). Candidate frames are sampled at a configurable rate (default 0.5 s). Each candidate is compared to the *last kept* frame using PIL `ImageChops.difference`; if the normalised mean pixel difference (0–1) exceeds a threshold, the frame is kept. The first frame is always kept. Good for security cameras with long static periods; thresholds are small (e.g. 0.01, 0.02, 0.05). Implemented as: ffmpeg extracts candidates to a temp dir, then Python compares consecutive images and keeps only those above threshold.
 - `**keyframe`** -- Extract only I-frames via ffmpeg `-skip_frame nokey` and `-vsync vfr`. Zero config; captures natural video structure.
-- `**uniform*`* -- Extract exactly N frames evenly spaced across the video. Duration is probed with ffprobe; for each of N frames, ffmpeg seeks to `t` and outputs one frame (`-ss t -frames:v 1`), with a 0.5 s margin from the end. Useful to test fixed frame counts regardless of video length.
+- `**uniform`** -- Extract exactly N frames evenly spaced across the video. Duration is probed with ffprobe; for each of N frames, ffmpeg seeks to `t` and outputs one frame (`-ss t -frames:v 1`), with a 0.5 s margin from the end. Useful to test fixed frame counts regardless of video length.
 
 Each strategy outputs temporary JPEG files, which are then resized (if a max-width is set) and base64-encoded for the Ollama API.
 

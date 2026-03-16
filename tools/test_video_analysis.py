@@ -117,15 +117,51 @@ def get_video_duration(video_path: Path) -> float | None:
 
 
 # ---------------------------------------------------------------------------
+# Hardware acceleration detection
+# ---------------------------------------------------------------------------
+
+_VAAPI_DEVICE = "/dev/dri/renderD128"
+
+
+def _detect_hwaccel() -> str | None:
+    """Probe for VAAPI hardware-accelerated decoding."""
+    if not Path(_VAAPI_DEVICE).exists():
+        return None
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-hwaccel", "vaapi", "-hwaccel_device", _VAAPI_DEVICE,
+                "-f", "lavfi", "-i", "color=black:s=64x64:d=0.1",
+                "-frames:v", "1", "-f", "null", "-",
+            ],
+            check=True, capture_output=True, timeout=10,
+        )
+        return "vaapi"
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def _hwaccel_input_flags(hwaccel: str | None) -> list[str]:
+    """Return ffmpeg input flags for the given hwaccel mode."""
+    if hwaccel == "vaapi":
+        return ["-hwaccel", "vaapi", "-hwaccel_device", _VAAPI_DEVICE]
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Frame extraction strategies
 # ---------------------------------------------------------------------------
 
 
-def extract_frames_interval(video: Path, out_dir: Path, interval: float) -> list[Path]:
+def extract_frames_interval(
+    video: Path, out_dir: Path, interval: float, *, hwaccel: str | None = None,
+) -> list[Path]:
     """Extract one frame every *interval* seconds."""
     pattern = str(out_dir / "frame_%04d.jpg")
     cmd = [
-        "ffmpeg", "-i", str(video),
+        "ffmpeg", *_hwaccel_input_flags(hwaccel),
+        "-i", str(video),
         "-vf", f"fps=1/{interval}",
         "-q:v", "2",
         pattern,
@@ -155,6 +191,8 @@ def extract_frames_motion(
     out_dir: Path,
     threshold: float,
     sample_rate: float = 0.5,
+    *,
+    hwaccel: str | None = None,
 ) -> list[Path]:
     """Extract frames where pixel-level change exceeds *threshold* (0-1).
 
@@ -167,7 +205,8 @@ def extract_frames_motion(
     candidates_dir.mkdir(parents=True, exist_ok=True)
     pattern = str(candidates_dir / "cand_%06d.jpg")
     cmd = [
-        "ffmpeg", "-i", str(video),
+        "ffmpeg", *_hwaccel_input_flags(hwaccel),
+        "-i", str(video),
         "-vf", f"fps=1/{sample_rate}",
         "-q:v", "2",
         pattern,
@@ -213,11 +252,14 @@ def extract_frames_motion(
     return kept
 
 
-def extract_frames_keyframe(video: Path, out_dir: Path) -> list[Path]:
+def extract_frames_keyframe(
+    video: Path, out_dir: Path, *, hwaccel: str | None = None,
+) -> list[Path]:
     """Extract only I-frames (keyframes)."""
     pattern = str(out_dir / "frame_%04d.jpg")
     cmd = [
-        "ffmpeg", "-skip_frame", "nokey",
+        "ffmpeg", *_hwaccel_input_flags(hwaccel),
+        "-skip_frame", "nokey",
         "-i", str(video),
         "-vsync", "vfr",
         "-q:v", "2",
@@ -227,7 +269,9 @@ def extract_frames_keyframe(video: Path, out_dir: Path) -> list[Path]:
     return sorted(out_dir.glob("frame_*.jpg"))
 
 
-def extract_frames_uniform(video: Path, out_dir: Path, count: int) -> list[Path]:
+def extract_frames_uniform(
+    video: Path, out_dir: Path, count: int, *, hwaccel: str | None = None,
+) -> list[Path]:
     """Extract exactly *count* frames evenly spaced across the video."""
     duration = get_video_duration(video)
     if duration is None or duration <= 0:
@@ -241,7 +285,8 @@ def extract_frames_uniform(video: Path, out_dir: Path, count: int) -> list[Path]
         t = (usable * i) / max(count - 1, 1) if count > 1 else usable / 2
         out_path = out_dir / f"frame_{i:04d}.jpg"
         cmd = [
-            "ffmpeg", "-ss", f"{t:.3f}",
+            "ffmpeg", *_hwaccel_input_flags(hwaccel),
+            "-ss", f"{t:.3f}",
             "-i", str(video),
             "-frames:v", "1", "-q:v", "2",
             str(out_path),
@@ -507,6 +552,7 @@ def run_single_test(
     ollama_timeout: float,
     work_dir: Path,
     num_ctx: int | None = None,
+    hwaccel: str | None = None,
 ) -> dict:
     """Run a single extraction + analysis test, return result dict."""
     method = config["method"]
@@ -515,8 +561,9 @@ def run_single_test(
     model = config["model"]
 
     param_desc = ", ".join(f"{k}={v}" for k, v in params.items())
+    accel_label = f" [{hwaccel}]" if hwaccel else ""
     _info(
-        f"[{model}] {method}({param_desc}) w={width} -> {video_label}"
+        f"[{model}] {method}({param_desc}) w={width}{accel_label} -> {video_label}"
     )
 
     # Extract frames into a per-test subdirectory
@@ -526,15 +573,16 @@ def run_single_test(
     t_extract = time.monotonic()
 
     if method == "interval":
-        frames = extract_frames_interval(video_path, frame_dir, params["interval"])
+        frames = extract_frames_interval(video_path, frame_dir, params["interval"], hwaccel=hwaccel)
     elif method == "motion":
         frames = extract_frames_motion(
             video_path, frame_dir, params["threshold"], params.get("sample_rate", 0.5),
+            hwaccel=hwaccel,
         )
     elif method == "keyframe":
-        frames = extract_frames_keyframe(video_path, frame_dir)
+        frames = extract_frames_keyframe(video_path, frame_dir, hwaccel=hwaccel)
     elif method == "uniform":
-        frames = extract_frames_uniform(video_path, frame_dir, params["count"])
+        frames = extract_frames_uniform(video_path, frame_dir, params["count"], hwaccel=hwaccel)
     else:
         _err(f"Unknown method: {method}")
         frames = []
@@ -547,6 +595,7 @@ def run_single_test(
         "method": method,
         "method_params": params,
         "width": width,
+        "hwaccel": hwaccel,
         "frames_extracted": len(frames),
         "total_image_bytes": 0,
         "prompt": prompt,
@@ -670,6 +719,9 @@ examples:
                     help="HTTP timeout for Ollama requests in seconds (default: 600).")
     p.add_argument("--output", type=str, default="test_results.json",
                     help="Output JSON file path (default: test_results.json).")
+    p.add_argument("--hwaccel", type=str, default="off",
+                    choices=["off", "auto", "vaapi"],
+                    help="Hardware acceleration for ffmpeg decoding: off (default), auto, or vaapi.")
     p.add_argument("--dry-run", action="store_true",
                     help="Show the test matrix without running any tests.")
 
@@ -692,6 +744,19 @@ def main() -> None:
     for m in args.methods:
         if m not in valid_methods:
             parser.error(f"Unknown method '{m}'. Choose from: {', '.join(sorted(valid_methods))}")
+
+    # Resolve hardware acceleration
+    if args.hwaccel == "auto":
+        hwaccel = _detect_hwaccel()
+        if hwaccel:
+            _info(f"Hardware acceleration: {hwaccel}")
+        else:
+            _info("Hardware acceleration: not available, using software")
+    elif args.hwaccel == "vaapi":
+        hwaccel = "vaapi"
+        _info("Hardware acceleration: vaapi (forced)")
+    else:
+        hwaccel = None
 
     # Resolve video files
     video_paths: list[Path] = []
@@ -778,6 +843,7 @@ def main() -> None:
                     ollama_timeout=args.ollama_timeout,
                     work_dir=work_dir,
                     num_ctx=args.num_ctx,
+                    hwaccel=hwaccel,
                 )
                 all_results.append(result)
 
@@ -798,6 +864,7 @@ def main() -> None:
             "prompt": args.prompt,
             "ollama_host": args.ollama_host,
             "num_ctx": args.num_ctx,
+            "hwaccel": hwaccel,
         },
         "results": all_results,
     }
