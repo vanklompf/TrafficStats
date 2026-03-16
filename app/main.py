@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI):
     # Initialise database
     init_db()
 
-    # Start analysis worker (Ollama snapshot analysis)
+    # Start analysis worker (Ollama video analysis)
     _analysis_worker = AnalysisWorker()
     _analysis_worker.start()
 

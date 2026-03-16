@@ -8,7 +8,7 @@ alwaysApply: false
 
 ## Overview
 
-Intrusion events detected by the Dahua camera are automatically analyzed by a local Ollama vision model. Analysis runs in a background thread so it never blocks event registration. Results are stored in SQLite and displayed in the web UI.
+Intrusion events detected by the Dahua camera are automatically analyzed by a local Ollama vision model. The worker extracts motion-significant frames from the event's video recording, sends them as a multi-image prompt to the LLM, and stores the result in SQLite. Analysis runs in a background thread so it never blocks event registration. Results are displayed in the web UI.
 
 ## Data flow
 
@@ -16,8 +16,13 @@ Intrusion events detected by the Dahua camera are automatically analyzed by a lo
 2. Calls `insert_event(event_type="intrusion")` which returns the new `event_id` (int or None if debounced).
 3. If event was inserted, calls `self.on_intrusion_registered(event_id)` -- a callback wired to `AnalysisWorker.enqueue()`.
 4. `enqueue()` puts the event id on an in-memory `queue.Queue` and appends to `_queue_contents` for the queue API. No DB persistence for the queue; it is lost on app restart and repopulated from unprocessed events (last 7 days).
-5. The single worker thread picks up the id, polls for the snapshot file (up to `ANALYSIS_SNAPSHOT_WAIT` seconds, default 120), resizes the image to max width `ANALYSIS_SNAPSHOT_MAX_WIDTH` (default 1024px) if larger, then sends the base64-encoded JPEG to `POST {OLLAMA_HOST}/api/chat` with `stream: false`.
-6. The Ollama response text is stored via `update_analysis(event_id, "done", ...)`.
+5. The single worker thread picks up the id, polls for the video file (DAV recording, up to `ANALYSIS_VIDEO_WAIT` seconds, default 300).
+6. The DAV file is converted to MP4 in a temporary directory using ffmpeg.
+7. Frames are sampled every `ANALYSIS_MOTION_SAMPLE_RATE` seconds (default 0.5) and filtered by motion: each candidate frame is compared to the previous kept frame by mean pixel difference; only frames with difference >= `ANALYSIS_MOTION_THRESHOLD` (default 0.03) are kept. The first frame is always kept.
+8. Kept frames are resized to max `ANALYSIS_FRAME_WIDTH` px (default 512), JPEG-encoded, and base64-encoded.
+9. All frame images are sent together in a single `POST {OLLAMA_HOST}/api/chat` request with `num_ctx` set to `OLLAMA_NUM_CTX` (default 8192).
+10. The Ollama response text is stored via `update_analysis(event_id, "done", ...)`.
+11. The temporary working directory (MP4 + extracted frames) is cleaned up.
 
 ## Database schema
 
@@ -45,9 +50,16 @@ Helper functions in `app/database.py`:
 - `enqueue(event_id)`: adds to in-memory queue only; skips if already queued.
 - `start()`: launches thread, then calls `_backfill()`.
 - `_backfill()`: in-memory queue only; enqueues intrusion events from last 7 days that have no analysis or have failed analysis.
-- `_process_one(event_id)`: polls for snapshot via `match_media_for_events()`, loads image with PIL, resizes to max width 1024px (configurable), encodes as JPEG and base64, calls Ollama `/api/chat`, stores result.
-- Snapshot polling sleeps 2s between checks up to `ANALYSIS_SNAPSHOT_WAIT`.
-- On any failure (no snapshot, API error, timeout), marks analysis as `failed`.
+- `_process_one(event_id)`: polls for video via `match_media_for_events()`, converts DAV to MP4, extracts motion-filtered frames, resizes to `ANALYSIS_FRAME_WIDTH` px, encodes as JPEG base64, calls Ollama `/api/chat` with multi-image payload and `num_ctx`, stores result.
+- Video polling sleeps 2s between checks up to `ANALYSIS_VIDEO_WAIT`.
+- On any failure (no video, conversion error, no frames, API error), marks analysis as `failed`.
+
+### Frame extraction pipeline
+
+1. **Candidate sampling**: ffmpeg extracts a frame every `ANALYSIS_MOTION_SAMPLE_RATE` seconds from the video.
+2. **Motion filtering**: each candidate is compared to the last kept frame via mean pixel difference on grayscale. If the difference >= `ANALYSIS_MOTION_THRESHOLD`, the frame is kept.
+3. **Resizing**: kept frames are downscaled to max `ANALYSIS_FRAME_WIDTH` px width (preserving aspect ratio).
+4. **Encoding**: frames are saved as JPEG (quality 85) and base64-encoded for the Ollama API.
 
 ## Ollama API usage
 
@@ -57,15 +69,16 @@ Endpoint: `POST {OLLAMA_HOST}/api/chat`
 {
   "model": "OLLAMA_MODEL value",
   "stream": false,
+  "options": {"num_ctx": 8192},
   "messages": [{
     "role": "user",
     "content": "OLLAMA_PROMPT value",
-    "images": ["<base64-encoded-jpeg>"]
+    "images": ["<base64-frame-1>", "<base64-frame-2>", "..."]
   }]
 }
 ```
 
-Requires a vision-capable model (e.g. `moondream`, `llava`, `qwen3-vl`). Text-only models will fail.
+Requires a vision-capable model (e.g. `qwen3-vl:8b`, `llava`). Text-only models will fail.
 
 ## API endpoints
 
@@ -98,11 +111,14 @@ Requires a vision-capable model (e.g. `moondream`, `llava`, `qwen3-vl`). Text-on
 | Variable | Default | Description |
 |---|---|---|
 | `OLLAMA_HOST` | `http://ollama:11434` | Hardcoded in docker-compose |
-| `OLLAMA_MODEL` | `moondream` | Vision model name |
-| `OLLAMA_PROMPT` | (security camera analysis prompt) | System prompt sent with image |
-| `ANALYSIS_SNAPSHOT_WAIT` | `120` | Seconds to wait for snapshot file |
-| `ANALYSIS_SNAPSHOT_MAX_WIDTH` | `1024` | Max width (px) for image sent to LLM; larger snapshots are downscaled |
+| `OLLAMA_MODEL` | `qwen3-vl:8b` | Vision model name |
+| `OLLAMA_PROMPT` | (video frame analysis prompt) | Prompt sent with extracted frames |
 | `OLLAMA_TIMEOUT` | `600` | HTTP timeout for Ollama request |
+| `OLLAMA_NUM_CTX` | `8192` | Context window size for Ollama |
+| `ANALYSIS_VIDEO_WAIT` | `300` | Seconds to wait for video file to appear on disk |
+| `ANALYSIS_FRAME_WIDTH` | `512` | Max width (px) for frames sent to LLM |
+| `ANALYSIS_MOTION_THRESHOLD` | `0.03` | Min pixel diff (0-1) to keep a frame; lower = more frames |
+| `ANALYSIS_MOTION_SAMPLE_RATE` | `0.5` | Interval (seconds) between candidate frame samples |
 
 ## Docker networking
 
@@ -110,10 +126,13 @@ The `trafficstats` container joins the external `ollama` Docker network (hardcod
 
 ## Key design decisions
 
+- **Video-based analysis**: instead of analyzing a single snapshot, motion-significant frames are extracted from the video recording and sent as a multi-image prompt, giving the LLM temporal context.
+- **Motion filtering**: avoids sending redundant near-identical frames; the threshold + sample rate balance frame count vs. information density.
 - **Non-blocking**: `enqueue()` is fire-and-forget; the camera listener thread is never blocked by LLM inference.
 - **Single worker thread**: serializes Ollama calls to avoid overloading the GPU. Queue is unbounded.
 - **In-memory queue**: queue is not persisted; on restart it is repopulated from events without analysis or with failed analysis in the last 7 days.
 - **Backfill on startup**: events from the last 7 days with no analysis or with failed analysis are enqueued into the in-memory queue.
 - **Lazy trigger via API**: opening the modal for an old event (no analysis row) triggers analysis on demand.
-- **Snapshot polling**: the snapshot file may not exist yet when the event fires (camera FTP upload delay). The worker retries every 2s.
-- **Graceful failure**: if the snapshot never arrives or Ollama errors, the analysis is marked `failed` and the UI shows this.
+- **Video polling**: the DAV file may not exist yet when the event fires (camera is still recording + FTP upload delay). The worker retries every 2s up to `ANALYSIS_VIDEO_WAIT`.
+- **Graceful failure**: if the video never arrives, conversion fails, or Ollama errors, the analysis is marked `failed` and the UI shows this.
+- **Temp cleanup**: temporary MP4 and extracted frames are cleaned up after each analysis run.
