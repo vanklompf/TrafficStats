@@ -12,3 +12,5 @@ venv/
 dist/
 build/
 data-test/
+tools/extracted_frames_review
+tools/test_results*.json

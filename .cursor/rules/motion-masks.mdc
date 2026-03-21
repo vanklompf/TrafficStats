@@ -1,0 +1,20 @@
+---
+description: Rules for motion-detection masks used in video analysis.
+globs:
+  - "**/*motion*"
+  - "**/*mask*"
+  - "**/video_analysis*"
+  - "**/test_video_analysis*"
+---
+
+# Motion-Detection Masks
+
+## Never auto-resize masks to fit frames
+
+Motion masks define pixel-accurate monitoring regions. Silently resizing a mask to match frame dimensions corrupts the intended geometry and produces incorrect detection results.
+
+If the mask dimensions do not match the frame dimensions, **abort with a clear error** telling the user the exact sizes so they can regenerate the mask at the correct resolution.
+
+## Mask generation
+
+Masks must be created at the exact resolution that frames will have after any ffmpeg scaling (e.g. `scale=WIDTH:-2`). The `-2` flag rounds height to even, so the mask height must account for this. When in doubt, extract a single frame at the target width first and use its dimensions for the mask.

@@ -56,10 +56,12 @@ Helper functions in `app/database.py`:
 
 ### Frame extraction pipeline
 
-1. **Candidate sampling**: ffmpeg extracts a frame every `ANALYSIS_MOTION_SAMPLE_RATE` seconds from the video.
-2. **Motion filtering**: each candidate is compared to the last kept frame via mean pixel difference on grayscale. If the difference >= `ANALYSIS_MOTION_THRESHOLD`, the frame is kept.
+1. **Candidate sampling**: ffmpeg extracts a frame every `ANALYSIS_MOTION_SAMPLE_RATE` seconds from the video. An optional `width` parameter adds an ffmpeg `scale={width}:-2` filter so candidates are extracted at a smaller resolution (faster I/O and diff).
+2. **Motion filtering**: each candidate is compared to the last kept frame via mean pixel difference on grayscale. If the difference >= `ANALYSIS_MOTION_THRESHOLD`, the frame is kept. An optional boolean mask (`mask_bool`, True=monitor, False=ignore) restricts the diff to selected pixels; if the mask dimensions don't match the (possibly scaled) frame, it is nearest-neighbour resized once on first use.
 3. **Resizing**: kept frames are downscaled to max `ANALYSIS_FRAME_WIDTH` px width (preserving aspect ratio).
 4. **Encoding**: frames are saved as JPEG (quality 85) and base64-encoded for the Ollama API.
+
+The test harness (`tools/test_video_analysis.py`) also supports `interval`, `keyframe`, and `uniform` extraction methods in addition to `motion`, each with optional `width` scaling and hardware-accelerated decoding (`hwaccel`).
 
 ## Ollama API usage
 
