@@ -18,8 +18,8 @@ Intrusion events detected by the Dahua camera are automatically analyzed by a lo
 4. `enqueue()` puts the event id on an in-memory `queue.Queue` and appends to `_queue_contents` for the queue API. No DB persistence for the queue; it is lost on app restart and repopulated from unprocessed events (last 7 days).
 5. The single worker thread picks up the id, polls for the video file (DAV recording, up to `ANALYSIS_VIDEO_WAIT` seconds, default 300).
 6. The DAV file is converted to MP4 in a temporary directory using ffmpeg.
-7. Frames are sampled every `ANALYSIS_MOTION_SAMPLE_RATE` seconds (default 0.5) and filtered by motion: each candidate frame is compared to the previous kept frame by mean pixel difference; only frames with difference >= `ANALYSIS_MOTION_THRESHOLD` (default 0.03) are kept. The first frame is always kept.
-8. Kept frames are resized to max `ANALYSIS_FRAME_WIDTH` px (default 512), JPEG-encoded, and base64-encoded.
+7. Frames are sampled every `ANALYSIS_MOTION_SAMPLE_RATE` seconds (default 0.25) and scaled to `ANALYSIS_FRAME_WIDTH` px width via ffmpeg, then filtered by motion: each candidate frame is compared to the previous kept frame by mean pixel difference (optionally restricted by a motion mask); only frames with difference >= `ANALYSIS_MOTION_THRESHOLD` (default 0.015) are kept. The first frame is always kept.
+8. Kept frames are already at target resolution; they are JPEG-encoded (quality 85) and base64-encoded.
 9. All frame images are sent together in a single `POST {OLLAMA_HOST}/api/chat` request with `num_ctx` set to `OLLAMA_NUM_CTX` (default 8192).
 10. The Ollama response text is stored via `update_analysis(event_id, "done", ...)`.
 11. The temporary working directory (MP4 + extracted frames) is cleaned up.
@@ -50,16 +50,21 @@ Helper functions in `app/database.py`:
 - `enqueue(event_id)`: adds to in-memory queue only; skips if already queued.
 - `start()`: launches thread, then calls `_backfill()`.
 - `_backfill()`: in-memory queue only; enqueues intrusion events from last 7 days that have no analysis or have failed analysis.
-- `_process_one(event_id)`: polls for video via `match_media_for_events()`, converts DAV to MP4, extracts motion-filtered frames, resizes to `ANALYSIS_FRAME_WIDTH` px, encodes as JPEG base64, calls Ollama `/api/chat` with multi-image payload and `num_ctx`, stores result.
+- `_process_one(event_id)`: polls for video via `match_media_for_events()`, converts DAV to MP4, extracts motion-filtered frames (already scaled to `ANALYSIS_FRAME_WIDTH` by ffmpeg), encodes as JPEG base64, calls Ollama `/api/chat` with multi-image payload and `num_ctx`, stores result.
 - Video polling sleeps 2s between checks up to `ANALYSIS_VIDEO_WAIT`.
 - On any failure (no video, conversion error, no frames, API error), marks analysis as `failed`.
 
-### Frame extraction pipeline
+### Frame extraction pipeline (resize-first workflow)
 
-1. **Candidate sampling**: ffmpeg extracts a frame every `ANALYSIS_MOTION_SAMPLE_RATE` seconds from the video. An optional `width` parameter adds an ffmpeg `scale={width}:-2` filter so candidates are extracted at a smaller resolution (faster I/O and diff).
-2. **Motion filtering**: each candidate is compared to the last kept frame via mean pixel difference on grayscale. If the difference >= `ANALYSIS_MOTION_THRESHOLD`, the frame is kept. An optional boolean mask (`mask_bool`, True=monitor, False=ignore) restricts the diff to selected pixels; if the mask dimensions don't match the (possibly scaled) frame, it is nearest-neighbour resized once on first use.
-3. **Resizing**: kept frames are downscaled to max `ANALYSIS_FRAME_WIDTH` px width (preserving aspect ratio).
-4. **Encoding**: frames are saved as JPEG (quality 85) and base64-encoded for the Ollama API.
+1. **Candidate sampling + scaling**: ffmpeg extracts a frame every `ANALYSIS_MOTION_SAMPLE_RATE` seconds (default 0.5) and scales to `ANALYSIS_FRAME_WIDTH` px width (`scale={width}:-2`) in a single pass. Frames are already at target resolution for both motion detection and LLM.
+2. **Motion filtering**: each candidate is compared to the last kept frame via mean pixel difference on grayscale. If the difference >= `ANALYSIS_MOTION_THRESHOLD`, the frame is kept. An optional boolean mask (`mask_bool`, True=monitor, False=ignore) restricts the diff to selected pixels. The mask must match frame dimensions exactly; a mismatch is logged as an error and the mask is ignored (no auto-resize).
+3. **Encoding**: kept frames (already at target resolution) are JPEG-encoded (quality 85) and base64-encoded for the Ollama API.
+
+### Motion mask
+
+A motion mask restricts which pixels contribute to the frame diff. White (>127) pixels are monitored, black pixels are ignored. The default mask is bundled at `app/masks/maska.png` and loaded on worker startup. Override via `ANALYSIS_MOTION_MASK` env var (set to `none` to disable).
+
+The mask must be created at the exact resolution that ffmpeg produces after `scale={ANALYSIS_FRAME_WIDTH}:-2`. If dimensions don't match, an error is logged and motion detection falls back to full-frame comparison.
 
 The test harness (`tools/test_video_analysis.py`) also supports `interval`, `keyframe`, and `uniform` extraction methods in addition to `motion`, each with optional `width` scaling and hardware-accelerated decoding (`hwaccel`).
 
@@ -119,8 +124,9 @@ Requires a vision-capable model (e.g. `qwen3-vl:8b`, `llava`). Text-only models 
 | `OLLAMA_NUM_CTX` | `8192` | Context window size for Ollama |
 | `ANALYSIS_VIDEO_WAIT` | `300` | Seconds to wait for video file to appear on disk |
 | `ANALYSIS_FRAME_WIDTH` | `512` | Max width (px) for frames sent to LLM |
-| `ANALYSIS_MOTION_THRESHOLD` | `0.03` | Min pixel diff (0-1) to keep a frame; lower = more frames |
+| `ANALYSIS_MOTION_THRESHOLD` | `0.015` | Min pixel diff (0-1) to keep a frame; lower = more frames |
 | `ANALYSIS_MOTION_SAMPLE_RATE` | `0.5` | Interval (seconds) between candidate frame samples |
+| `ANALYSIS_MOTION_MASK` | (bundled `app/masks/maska.png`) | Path to motion mask image; set to `none` to disable |
 
 ## Docker networking
 

@@ -31,6 +31,7 @@ from app.database import (
 )
 from app.dahua import DahuaListener, create_listener_from_env
 from app.analysis import AnalysisWorker
+from app.notifications import send_intrusion_notification
 from app.intrusions import (
     MEDIA_PATH,
     get_camera_timezone_name,
@@ -71,9 +72,15 @@ async def lifespan(app: FastAPI):
     _analysis_worker = AnalysisWorker()
     _analysis_worker.start()
 
-    # Start Dahua event listener (notify worker when intrusion is registered)
+    # Start Dahua event listener (notify + enqueue when intrusion is registered)
+    def _on_intrusion(event_id: int) -> None:
+        event = get_event_by_id(event_id)
+        if event:
+            send_intrusion_notification(event_id, event["timestamp"])
+        _analysis_worker.enqueue(event_id)
+
     _listener = create_listener_from_env(
-        on_intrusion_registered=_analysis_worker.enqueue,
+        on_intrusion_registered=_on_intrusion,
     )
     if _listener is not None:
         _listener.start()

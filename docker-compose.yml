@@ -27,6 +27,7 @@ services:
       - VIDEO_CACHE_MAX_GB=${VIDEO_CACHE_MAX_GB:-20}
       - VIDEO_HW_ACCEL=${VIDEO_HW_ACCEL:-auto}
       - TZ=${TZ:-Europe/Warsaw}
+      - NTFY_TOPIC=${NTFY_TOPIC:-}
       - OLLAMA_HOST=http://ollama:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen3-vl:8b}
     env_file:
