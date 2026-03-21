@@ -7,6 +7,7 @@ On startup, initialises the database and launches the Dahua event listener.
 """
 
 import logging
+import mimetypes
 import os
 import re
 from contextlib import asynccontextmanager
@@ -316,10 +317,12 @@ async def api_intrusion_event(event_id: int):
         ev["thumbnail_url"] = None
     if ev["video"]:
         ev["video_url"] = f"/media/video/{vid_date}/{ev['video']}"
+        ev["video_original_url"] = f"/media/video-original/{vid_date}/{ev['video']}"
         ev["video_path"] = str(Path(MEDIA_PATH) / vid_date / ev["video"])
         ev["video_cached"] = is_video_cached(vid_date, ev["video"])
     else:
         ev["video_url"] = None
+        ev["video_original_url"] = None
         ev["video_path"] = None
         ev["video_cached"] = False
 
@@ -364,10 +367,12 @@ async def api_intrusions(date: str = Query(default="")):
             ev["thumbnail_url"] = None
         if ev["video"]:
             ev["video_url"] = f"/media/video/{vid_date}/{ev['video']}"
+            ev["video_original_url"] = f"/media/video-original/{vid_date}/{ev['video']}"
             ev["video_path"] = str(Path(MEDIA_PATH) / vid_date / ev["video"])
             ev["video_cached"] = is_video_cached(vid_date, ev["video"])
         else:
             ev["video_url"] = None
+            ev["video_original_url"] = None
             ev["video_path"] = None
             ev["video_cached"] = False
 
@@ -401,6 +406,25 @@ async def media_thumbnail(date_str: str, filename: str):
         str(thumb),
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400, immutable"},
+    )
+
+
+@app.get("/media/video-original/{date_str}/{filename}")
+async def media_video_original(date_str: str, filename: str):
+    """Serve the raw recording from disk (e.g. camera DAV) for download."""
+    date_str = _validate_date(date_str)
+    filename = _validate_filename(filename)
+    path = Path(MEDIA_PATH) / date_str / filename
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Video file not found")
+    media_type, _ = mimetypes.guess_type(filename)
+    if not media_type:
+        media_type = "application/octet-stream"
+    return FileResponse(
+        str(path),
+        media_type=media_type,
+        filename=filename,
+        content_disposition_type="attachment",
     )
 
 

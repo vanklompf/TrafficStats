@@ -1339,7 +1339,7 @@
         video.preload = 'auto';
         video.src = ev.video_url;
         modalBody.appendChild(video);
-        modalDownload.href = ev.video_url;
+        modalDownload.href = ev.video_original_url || ev.video_url;
         modalDownload.style.display = '';
         modalDownload.textContent = 'Download video';
         if (ev.video_path) {
