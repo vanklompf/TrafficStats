@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh").rstrip("/")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "").strip()
-NTFY_PRIORITY = os.environ.get("NTFY_PRIORITY", "high").strip()
+NTFY_PRIORITY = os.environ.get("NTFY_PRIORITY", "default").strip()
 
 SNAPSHOT_POLL_INTERVAL = 2
 SNAPSHOT_POLL_TIMEOUT = int(os.environ.get("NTFY_SNAPSHOT_WAIT", "10"))
