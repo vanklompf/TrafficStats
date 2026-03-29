@@ -65,7 +65,7 @@ def send_intrusion_notification(event_id: int, timestamp: str) -> None:
     }
 
     if NTFY_CLICK_URL:
-        headers["Click"] = f"{NTFY_CLICK_URL}/#/event/{event_id}"
+        headers["Click"] = f"{NTFY_CLICK_URL}/#/dispatch/{event_id}"
 
     url = f"{NTFY_URL}/{NTFY_TOPIC}"
 

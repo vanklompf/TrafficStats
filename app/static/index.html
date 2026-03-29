@@ -1537,6 +1537,33 @@
       if (!hash || hash === '#') return false;
 
       // #/event/{id} — open a specific intrusion event modal
+      // #/dispatch/{id} — notification click: video modal if available, live view otherwise
+      const dispatchMatch = hash.match(/^#\/dispatch\/(\d+)$/);
+      if (dispatchMatch) {
+        const eventId = parseInt(dispatchMatch[1], 10);
+        try {
+          const resp = await fetch('/api/intrusions/event/' + eventId);
+          if (!resp.ok) { switchTab('live'); return true; }
+          const data = await resp.json();
+          const ev = data.event;
+          const tz = data.timezone || 'UTC';
+          if (ev.video_url) {
+            if (currentTab !== 'intrusions') switchTab('intrusions', false);
+            dateInput.value = data.date;
+            updateWeekdayLabel();
+            loadIntrusions();
+            openModal(ev, tz);
+          } else {
+            switchTab('live');
+          }
+          return true;
+        } catch (_) {
+          switchTab('live');
+          return true;
+        }
+      }
+
+      // #/event/{id} — open a specific intrusion event modal
       const eventMatch = hash.match(/^#\/event\/(\d+)$/);
       if (eventMatch) {
         const eventId = parseInt(eventMatch[1], 10);
