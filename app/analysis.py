@@ -30,8 +30,6 @@ from app.database import (
     update_analysis,
 )
 from app.intrusions import MEDIA_PATH, match_media_for_events
-from app.notifications import update_intrusion_notification
-
 logger = logging.getLogger(__name__)
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
@@ -356,16 +354,11 @@ class AnalysisWorker:
         # Wait for the video recording (DAV file) to appear on disk
         video_path = None
         video_date = None
-        snapshot_path = None
         deadline = time.monotonic() + ANALYSIS_VIDEO_WAIT
         while time.monotonic() < deadline and not self._stop.is_set():
             matched = match_media_for_events(ev, date_str)
             if matched:
                 m = matched[0]
-                if m.get("snapshot") and m.get("snapshot_date"):
-                    snapshot_path = Path(MEDIA_PATH) / m["snapshot_date"] / m["snapshot"]
-                    if not snapshot_path.is_file():
-                        snapshot_path = None
                 if m.get("video") and m.get("video_date"):
                     candidate = Path(MEDIA_PATH) / m["video_date"] / m["video"]
                     if candidate.is_file():
@@ -380,7 +373,6 @@ class AnalysisWorker:
                 event_id, timestamp, ANALYSIS_VIDEO_WAIT,
             )
             update_analysis(event_id, "failed", analysis=None, model=None)
-            update_intrusion_notification(event_id, timestamp, None, snapshot_path)
             return
 
         logger.info("[AI] Processing event %s (%s) — video: %s", event_id, timestamp, video_path.name)
@@ -395,7 +387,6 @@ class AnalysisWorker:
                 if mp4_path is None:
                     logger.warning("[AI] DAV conversion failed for event %s (%s)", event_id, timestamp)
                     update_analysis(event_id, "failed", analysis=None, model=None)
-                    update_intrusion_notification(event_id, timestamp, None, snapshot_path)
                     return
             else:
                 mp4_path = video_path
@@ -414,7 +405,6 @@ class AnalysisWorker:
             if not frames:
                 logger.warning("[AI] No frames extracted for event %s (%s)", event_id, timestamp)
                 update_analysis(event_id, "failed", analysis=None, model=None)
-                update_intrusion_notification(event_id, timestamp, None, snapshot_path)
                 return
 
             images_b64, total_bytes = _load_and_encode_frames(frames)
@@ -426,7 +416,6 @@ class AnalysisWorker:
             if not images_b64:
                 logger.warning("[AI] All frames failed to encode for event %s (%s)", event_id, timestamp)
                 update_analysis(event_id, "failed", analysis=None, model=None)
-                update_intrusion_notification(event_id, timestamp, None, snapshot_path)
                 return
 
             # Call Ollama
@@ -455,12 +444,10 @@ class AnalysisWorker:
                     event_id, timestamp, e.response.status_code, e.response.text[:200],
                 )
                 update_analysis(event_id, "failed", analysis=None, model=None)
-                update_intrusion_notification(event_id, timestamp, None, snapshot_path)
                 return
             except Exception as e:
                 logger.exception("[AI] Ollama request failed for event %s (%s): %s", event_id, timestamp, e)
                 update_analysis(event_id, "failed", analysis=None, model=None)
-                update_intrusion_notification(event_id, timestamp, None, snapshot_path)
                 return
             elapsed = time.monotonic() - t0
 
@@ -471,7 +458,6 @@ class AnalysisWorker:
 
             analysis_text = content.strip() or None
             update_analysis(event_id, "done", analysis=analysis_text, model=model_used)
-            update_intrusion_notification(event_id, timestamp, analysis_text, snapshot_path)
             logger.info(
                 "[AI] Analysis done for event %s (%s) — model: %s, %.1fs, %s frames, %s tokens",
                 event_id, timestamp, model_used, elapsed, len(images_b64), eval_count,
@@ -480,7 +466,6 @@ class AnalysisWorker:
         except Exception as e:
             logger.exception("[AI] Unexpected error analysing event %s (%s): %s", event_id, timestamp, e)
             update_analysis(event_id, "failed", analysis=None, model=None)
-            update_intrusion_notification(event_id, timestamp, None, snapshot_path)
         finally:
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)

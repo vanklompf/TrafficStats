@@ -612,6 +612,30 @@
     .live-wrapper:fullscreen img {
       object-fit: contain;
     }
+
+    footer {
+      max-width: 1100px;
+      margin: 2rem auto 0;
+      padding: 1rem 0;
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: .5rem;
+      font-size: .75rem;
+      color: var(--text-dim);
+    }
+    footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color .15s ease;
+    }
+    footer a:hover {
+      color: var(--accent);
+    }
+    footer .sep {
+      opacity: .4;
+    }
   </style>
 </head>
 <body>
@@ -719,6 +743,12 @@
       </div>
     </div>
   </div>
+
+  <footer>
+    <span>TrafficStats <span id="app-version"></span></span>
+    <span class="sep">·</span>
+    <a href="https://github.com/vanklompf/TrafficStats" target="_blank" rel="noopener">GitHub</a>
+  </footer>
 
   <!-- Video / snapshot modal -->
   <div class="modal-overlay" id="modal-overlay">
@@ -1561,6 +1591,10 @@
     setInterval(() => {
       if (currentTab === 'traffic') fetchData();
     }, 60_000);
+
+    fetch('/api/version').then(r => r.json()).then(d => {
+      document.getElementById('app-version').textContent = d.version || '';
+    }).catch(() => {});
 
     // Handle initial hash route, or fall back to loading today's intrusions
     handleHashRoute().then(handled => {

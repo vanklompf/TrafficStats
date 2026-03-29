@@ -276,6 +276,7 @@ def match_media_for_events(
             if rng is not None:
                 davs.append((f, _camera_to_utc(rng[0]), _camera_to_utc(rng[1]), ds))
 
+
     jpgs.sort(key=lambda x: x[1])
     davs.sort(key=lambda x: x[1])
 

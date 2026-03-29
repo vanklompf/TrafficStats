@@ -143,6 +143,12 @@ async def health():
     }
 
 
+@app.get("/api/version")
+async def version():
+    """Return the application version."""
+    return {"version": os.environ.get("APP_VERSION", "dev")}
+
+
 # ---------------------------------------------------------------------------
 # Live camera view
 # ---------------------------------------------------------------------------

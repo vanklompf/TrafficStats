@@ -220,6 +220,7 @@ def extract_frames_motion(
     mask_bool: np.ndarray | None = None,
     width: int | None = None,
     cleanup_candidates: bool = False,
+    timing_out: dict | None = None,
 ) -> list[Path]:
     """Extract frames where pixel-level change exceeds *threshold* (0-1).
 
@@ -248,7 +249,9 @@ def extract_frames_motion(
         "-q:v", "2",
         pattern,
     ]
+    t_ffmpeg0 = time.monotonic()
     _run_ffmpeg(cmd)
+    t_ffmpeg1 = time.monotonic()
 
     candidate_paths = sorted(candidates_dir.glob("cand_*.jpg"))
     if not candidate_paths:
@@ -260,6 +263,7 @@ def extract_frames_motion(
     ref_img: Image.Image | None = None
     frame_idx = 0
 
+    t_motion0 = time.monotonic()
     for cp in candidate_paths:
         try:
             img = Image.open(cp)
@@ -284,14 +288,27 @@ def extract_frames_motion(
             ref_img = img
             frame_idx += 1
 
+    t_motion1 = time.monotonic()
+
     mask_label = " +mask" if mask_bool is not None else ""
     width_label = f" @{width}px" if width else ""
     _info(
         f"  Motion filter: {len(candidate_paths)} candidates -> "
         f"{len(kept)} kept (threshold={threshold}, sample_rate={sample_rate}s{width_label}{mask_label})"
     )
+
+    t_clean0 = time.monotonic()
     if cleanup_candidates and candidates_dir.is_dir():
         shutil.rmtree(candidates_dir)
+    t_clean1 = time.monotonic()
+
+    if timing_out is not None:
+        timing_out["ffmpeg_candidates_s"] = round(t_ffmpeg1 - t_ffmpeg0, 4)
+        timing_out["motion_filter_s"] = round(t_motion1 - t_motion0, 4)
+        timing_out["cleanup_candidates_s"] = round(t_clean1 - t_clean0, 4)
+        timing_out["candidates_n"] = len(candidate_paths)
+        timing_out["kept_n"] = len(kept)
+
     return kept
 
 
@@ -665,10 +682,12 @@ def run_single_test(
             hwaccel=hwaccel, width=width,
         )
     elif method == "motion":
+        motion_timing: dict | None = {}
         frames = extract_frames_motion(
             video_path, frame_dir, params["threshold"], params.get("sample_rate", 0.5),
             hwaccel=hwaccel, mask_bool=motion_mask_bool, width=width,
             cleanup_candidates=extract_only,
+            timing_out=motion_timing,
         )
     elif method == "keyframe":
         frames = extract_frames_keyframe(video_path, frame_dir, hwaccel=hwaccel, width=width)
@@ -703,6 +722,8 @@ def run_single_test(
         "ollama_eval_duration_ns": None,
         "error": None,
     }
+    if method == "motion":
+        result["extract_stages_s"] = motion_timing
 
     if not frames:
         result["error"] = "No frames extracted"
