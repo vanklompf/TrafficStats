@@ -1,0 +1,1 @@
+python3 ./test_video_analysis.py --media-path /mnt/docker/tmp/video_ai_test --max-videos 4 --methods motion --motion-sample-rate 0.5 --motion-thresholds 0.015 --motion-mask maska.png --widths=512 --extract-only --output test_results_5.json
