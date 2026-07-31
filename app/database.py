@@ -491,6 +491,13 @@ def update_analysis(
     conn.commit()
 
 
+def delete_analysis(event_id: int) -> None:
+    """Remove any stored analysis result for an event (used when retrying)."""
+    conn = _get_conn()
+    conn.execute("DELETE FROM event_analysis WHERE event_id = ?", (event_id,))
+    conn.commit()
+
+
 def get_intrusion_event_ids_without_analysis(max_age_days: int | None = None) -> list[int]:
     """Return intrusion event IDs that have no analysis or have failed analysis (for backfill).
 

@@ -4,6 +4,12 @@ TrafficStats -- FastAPI application.
 Serves the dashboard and provides an API for traffic event statistics
 and intrusion event browsing with snapshot/video media.
 On startup, initialises the database and launches the Dahua event listener.
+
+Handlers that touch SQLite or the media filesystem are declared ``def``
+rather than ``async def`` so Starlette runs them in a worker thread.  They
+block for a long time -- an ffmpeg transcode can take minutes and media
+scans hit network storage -- and on the event loop that would stall every
+other request in the app, including the health check and the live view.
 """
 
 import logging
@@ -22,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from app.database import (
     init_db,
     close_conn,
+    delete_analysis,
     get_stats,
     get_intrusion_events,
     get_intrusion_dates,
@@ -115,7 +122,7 @@ async def index():
 
 
 @app.get("/api/stats")
-async def api_stats(
+def api_stats(
     range: str = Query("day", pattern="^(day|week)$"),
     date: str = Query(default=""),
 ):
@@ -244,13 +251,13 @@ def _validate_filename(filename: str) -> str:
 
 
 @app.get("/api/intrusions/dates")
-async def api_intrusion_dates():
+def api_intrusion_dates():
     """Return list of dates that have intrusion events."""
     return JSONResponse(content={"dates": get_intrusion_dates()})
 
 
 @app.get("/api/intrusions/analysis/queue")
-async def api_analysis_queue():
+def api_analysis_queue():
     """Return list of events in the in-memory analysis queue (waiting for LLM), plus queue size."""
     if _analysis_worker is None:
         return JSONResponse(content={"pending": [], "queue_size": 0})
@@ -272,14 +279,19 @@ async def api_analysis_queue():
 
 
 @app.get("/api/intrusions/analysis/{event_id}")
-async def api_intrusion_analysis(event_id: int):
+def api_intrusion_analysis(event_id: int):
     """Return analysis status and text for an intrusion event.
 
-    If no analysis exists yet (or the previous attempt failed), enqueues the
-    event for LLM description generation and returns status 'pending'.
+    Reports the stored status verbatim, including 'failed', so the UI can stop
+    polling and offer a retry.  Re-running a failed analysis is an explicit
+    action (see the /retry endpoint) -- doing it here would let an event that
+    can never succeed re-enter the queue on every poll and starve the worker.
+
+    When no analysis row exists the event is queued once, which lazily covers
+    events older than the startup backfill window.
     """
     analysis = get_analysis(event_id)
-    if analysis is not None and analysis["status"] != "failed":
+    if analysis is not None:
         return JSONResponse(content={
             "event_id": analysis["event_id"],
             "status": analysis["status"],
@@ -299,8 +311,30 @@ async def api_intrusion_analysis(event_id: int):
     })
 
 
+@app.post("/api/intrusions/analysis/{event_id}/retry")
+def api_intrusion_analysis_retry(event_id: int):
+    """Queue a fresh analysis attempt for an intrusion event.
+
+    Clears the stored result first so polling reports 'pending' instead of the
+    previous outcome until the worker finishes.
+    """
+    event = get_event_by_id(event_id)
+    if event is None or event.get("event_type") != "intrusion":
+        raise HTTPException(status_code=404, detail="Intrusion event not found")
+    if _analysis_worker is None:
+        raise HTTPException(status_code=503, detail="Analysis worker not running")
+    delete_analysis(event_id)
+    _analysis_worker.enqueue(event_id)
+    return JSONResponse(content={
+        "event_id": event_id,
+        "status": "pending",
+        "analysis": None,
+        "model": None,
+    })
+
+
 @app.get("/api/intrusions/event/{event_id}")
-async def api_intrusion_event(event_id: int):
+def api_intrusion_event(event_id: int):
     """Return a single intrusion event with media URLs and analysis."""
     event = get_event_by_id(event_id)
     if event is None or event.get("event_type") != "intrusion":
@@ -347,7 +381,7 @@ async def api_intrusion_event(event_id: int):
 
 
 @app.get("/api/intrusions")
-async def api_intrusions(date: str = Query(default="")):
+def api_intrusions(date: str = Query(default="")):
     """
     Return intrusion events for a given date with matched media.
 
@@ -397,7 +431,7 @@ async def api_intrusions(date: str = Query(default="")):
 
 
 @app.get("/media/snapshot/{date_str}/{filename}")
-async def media_snapshot(date_str: str, filename: str):
+def media_snapshot(date_str: str, filename: str):
     """Serve a JPG snapshot from the media directory."""
     date_str = _validate_date(date_str)
     filename = _validate_filename(filename)
@@ -408,7 +442,7 @@ async def media_snapshot(date_str: str, filename: str):
 
 
 @app.get("/media/thumbnail/{date_str}/{filename}")
-async def media_thumbnail(date_str: str, filename: str):
+def media_thumbnail(date_str: str, filename: str):
     """Serve a cached, downscaled thumbnail for a snapshot."""
     date_str = _validate_date(date_str)
     filename = _validate_filename(filename)
@@ -423,7 +457,7 @@ async def media_thumbnail(date_str: str, filename: str):
 
 
 @app.get("/media/video-original/{date_str}/{filename}")
-async def media_video_original(date_str: str, filename: str):
+def media_video_original(date_str: str, filename: str):
     """Serve the raw recording from disk (e.g. camera DAV) for download."""
     date_str = _validate_date(date_str)
     filename = _validate_filename(filename)
@@ -442,7 +476,7 @@ async def media_video_original(date_str: str, filename: str):
 
 
 @app.get("/media/video/{date_str}/{filename}")
-async def media_video(date_str: str, filename: str):
+def media_video(date_str: str, filename: str):
     """
     Serve a DAV recording as a browser-friendly MP4.
 

@@ -138,7 +138,7 @@ def _extract_frames_motion(
     *,
     width: int | None = None,
     mask_bool: np.ndarray | None = None,
-) -> list[Path]:
+) -> tuple[list[Path], float]:
     """Extract frames where pixel-level change exceeds *threshold*.
 
     Candidates are sampled every *sample_rate* seconds and optionally scaled
@@ -147,6 +147,10 @@ def _extract_frames_motion(
 
     If *mask_bool* is provided, only True pixels contribute to the diff.
     The mask must match the (scaled) frame dimensions exactly.
+
+    Returns ``(kept_paths, span_seconds)`` where *span_seconds* is the
+    wall-clock gap between the first and last kept frame (0 for a single
+    frame or when nothing is kept).
     """
     candidates_dir = out_dir / "_candidates"
     candidates_dir.mkdir(parents=True, exist_ok=True)
@@ -159,18 +163,19 @@ def _extract_frames_motion(
         pattern,
     ]
     if not _run_ffmpeg(cmd):
-        return []
+        return [], 0.0
 
     candidate_paths = sorted(candidates_dir.glob("cand_*.jpg"))
     if not candidate_paths:
         shutil.rmtree(candidates_dir, ignore_errors=True)
-        return []
+        return [], 0.0
 
     kept: list[Path] = []
+    kept_offsets: list[float] = []
     ref_img: Image.Image | None = None
     frame_idx = 0
 
-    for cp in candidate_paths:
+    for cand_i, cp in enumerate(candidate_paths):
         try:
             img = Image.open(cp)
             img.load()
@@ -178,10 +183,12 @@ def _extract_frames_motion(
             logger.debug("[AI] Cannot open candidate frame %s: %s", cp.name, e)
             continue
 
+        offset = cand_i * sample_rate
         if ref_img is None:
             dst = out_dir / f"frame_{frame_idx:04d}.jpg"
             cp.rename(dst)
             kept.append(dst)
+            kept_offsets.append(offset)
             ref_img = img
             frame_idx += 1
             continue
@@ -191,19 +198,43 @@ def _extract_frames_motion(
             dst = out_dir / f"frame_{frame_idx:04d}.jpg"
             cp.rename(dst)
             kept.append(dst)
+            kept_offsets.append(offset)
             ref_img = img
             frame_idx += 1
+
+    span = (kept_offsets[-1] - kept_offsets[0]) if len(kept_offsets) > 1 else 0.0
 
     mask_label = " +mask" if mask_bool is not None else ""
     width_label = f" @{width}px" if width else ""
     logger.debug(
-        "[AI] Motion filter: %d candidates -> %d kept "
+        "[AI] Motion filter: %d candidates -> %d kept spanning %.1fs "
         "(threshold=%.3f, sample_rate=%.2fs%s%s)",
-        len(candidate_paths), len(kept), threshold, sample_rate,
+        len(candidate_paths), len(kept), span, threshold, sample_rate,
         width_label, mask_label,
     )
     shutil.rmtree(candidates_dir, ignore_errors=True)
-    return kept
+    return kept, span
+
+
+def _format_span_seconds(span_secs: float) -> str:
+    """Human-readable duration for the LLM timing prefix."""
+    if abs(span_secs - round(span_secs)) < 0.05:
+        return str(int(round(span_secs)))
+    return f"{span_secs:.1f}"
+
+
+def _prompt_with_timing(n_frames: int, span_secs: float) -> str:
+    """Prefix OLLAMA_PROMPT with chronological frame timing context."""
+    if n_frames <= 0:
+        return OLLAMA_PROMPT
+    if n_frames == 1:
+        timing = "This is 1 frame from the video."
+    else:
+        timing = (
+            f"These are {n_frames} frames in chronological order "
+            f"spanning {_format_span_seconds(span_secs)} seconds of video."
+        )
+    return f"{timing} {OLLAMA_PROMPT}"
 
 
 def _load_and_encode_frames(frame_paths: list[Path]) -> tuple[list[str], int]:
@@ -232,6 +263,25 @@ def _load_and_encode_frames(frame_paths: list[Path]) -> tuple[list[str], int]:
 # ---------------------------------------------------------------------------
 # Temporary DAV-to-MP4 conversion for frame extraction
 # ---------------------------------------------------------------------------
+
+
+def _video_wait_seconds(timestamp: str) -> float:
+    """Seconds to keep polling for the DAV upload of an event at *timestamp*.
+
+    The camera needs up to ``ANALYSIS_VIDEO_WAIT`` to finish recording and
+    upload.  Once that window has elapsed the file either exists or never
+    will, so events queued long after they fired (startup backfill, lazy UI
+    trigger, retry) get a single check instead of holding the worker for the
+    full timeout.
+    """
+    try:
+        event_dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc,
+        )
+    except ValueError:
+        return float(ANALYSIS_VIDEO_WAIT)
+    age = (datetime.now(timezone.utc) - event_dt).total_seconds()
+    return max(0.0, min(float(ANALYSIS_VIDEO_WAIT), ANALYSIS_VIDEO_WAIT - age))
 
 
 def _convert_dav_to_mp4_temp(dav_path: Path, output_dir: Path) -> Path | None:
@@ -266,6 +316,7 @@ class AnalysisWorker:
     def __init__(self):
         self._queue: queue.Queue[int] = queue.Queue()
         self._queue_contents: list[dict] = []
+        self._processing: set[int] = set()
         self._queue_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -280,8 +331,15 @@ class AnalysisWorker:
             return [dict(item) for item in self._queue_contents]
 
     def enqueue(self, event_id: int) -> None:
-        """Schedule an intrusion event for analysis. Non-blocking."""
+        """Schedule an intrusion event for analysis. Non-blocking.
+
+        Ignores events that are already queued or currently being processed,
+        so repeated triggers (UI polling, backfill, retry) cannot stack up
+        duplicate runs for the same event.
+        """
         with self._queue_lock:
+            if event_id in self._processing:
+                return
             if any(item["event_id"] == event_id for item in self._queue_contents):
                 return
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -338,7 +396,12 @@ class AnalysisWorker:
                 continue
             with self._queue_lock:
                 self._queue_contents[:] = [x for x in self._queue_contents if x["event_id"] != event_id]
-            self._process_one(event_id)
+                self._processing.add(event_id)
+            try:
+                self._process_one(event_id)
+            finally:
+                with self._queue_lock:
+                    self._processing.discard(event_id)
 
     def _process_one(self, event_id: int) -> None:
         """Process a single event: wait for video, extract frames, call Ollama."""
@@ -353,9 +416,9 @@ class AnalysisWorker:
 
         # Wait for the video recording (DAV file) to appear on disk
         video_path = None
-        video_date = None
-        deadline = time.monotonic() + ANALYSIS_VIDEO_WAIT
-        while time.monotonic() < deadline and not self._stop.is_set():
+        wait_secs = _video_wait_seconds(timestamp)
+        deadline = time.monotonic() + wait_secs
+        while True:
             matched = match_media_for_events(ev, date_str)
             if matched:
                 m = matched[0]
@@ -363,14 +426,15 @@ class AnalysisWorker:
                     candidate = Path(MEDIA_PATH) / m["video_date"] / m["video"]
                     if candidate.is_file():
                         video_path = candidate
-                        video_date = m["video_date"]
                         break
+            if self._stop.is_set() or time.monotonic() >= deadline:
+                break
             time.sleep(2)
 
         if video_path is None:
             logger.warning(
-                "[AI] No video found for event %s (%s) within %ds",
-                event_id, timestamp, ANALYSIS_VIDEO_WAIT,
+                "[AI] No video found for event %s (%s) within %.0fs",
+                event_id, timestamp, wait_secs,
             )
             update_analysis(event_id, "failed", analysis=None, model=None)
             return
@@ -394,7 +458,7 @@ class AnalysisWorker:
             # Extract motion-significant frames (resized to target width by ffmpeg)
             frame_dir = work_dir / "frames"
             frame_dir.mkdir()
-            frames = _extract_frames_motion(
+            frames, span_secs = _extract_frames_motion(
                 mp4_path, frame_dir,
                 threshold=ANALYSIS_MOTION_THRESHOLD,
                 sample_rate=ANALYSIS_MOTION_SAMPLE_RATE,
@@ -408,9 +472,10 @@ class AnalysisWorker:
                 return
 
             images_b64, total_bytes = _load_and_encode_frames(frames)
+            prompt = _prompt_with_timing(len(images_b64), span_secs)
             logger.info(
-                "[AI] Event %s: %d frames, %.0f KB image data",
-                event_id, len(images_b64), total_bytes / 1024,
+                "[AI] Event %s: %d frames spanning %.1fs, %.0f KB image data",
+                event_id, len(images_b64), span_secs, total_bytes / 1024,
             )
 
             if not images_b64:
@@ -425,7 +490,7 @@ class AnalysisWorker:
                 "messages": [
                     {
                         "role": "user",
-                        "content": OLLAMA_PROMPT,
+                        "content": prompt,
                         "images": images_b64,
                     }
                 ],

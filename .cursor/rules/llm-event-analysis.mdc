@@ -15,12 +15,12 @@ Intrusion events detected by the Dahua camera are automatically analyzed by a lo
 1. `DahuaListener._process_line()` (in `app/dahua.py`) detects an intrusion IVS event.
 2. Calls `insert_event(event_type="intrusion")` which returns the new `event_id` (int or None if debounced).
 3. If event was inserted, calls `self.on_intrusion_registered(event_id)` -- a callback wired to `AnalysisWorker.enqueue()`.
-4. `enqueue()` puts the event id on an in-memory `queue.Queue` and appends to `_queue_contents` for the queue API. No DB persistence for the queue; it is lost on app restart and repopulated from unprocessed events (last 7 days).
-5. The single worker thread picks up the id, polls for the video file (DAV recording, up to `ANALYSIS_VIDEO_WAIT` seconds, default 300).
+4. `enqueue()` puts the event id on an in-memory `queue.Queue` and appends to `_queue_contents` for the queue API. No DB persistence for the queue; it is lost on app restart and repopulated from unprocessed events (last 7 days). Events already queued *or currently being processed* are ignored, so repeated triggers cannot stack duplicate runs.
+5. The single worker thread picks up the id and polls for the video file (DAV recording). The polling budget is `ANALYSIS_VIDEO_WAIT` (default 300) **minus the event's age**: a fresh event gets the full window, while an event queued long after it fired (backfill, lazy trigger, retry) gets a single check. See "Age-aware video wait" below.
 6. The DAV file is converted to MP4 in a temporary directory using ffmpeg.
 7. Frames are sampled every `ANALYSIS_MOTION_SAMPLE_RATE` seconds (default 0.25) and scaled to `ANALYSIS_FRAME_WIDTH` px width via ffmpeg, then filtered by motion: each candidate frame is compared to the previous kept frame by mean pixel difference (optionally restricted by a motion mask); only frames with difference >= `ANALYSIS_MOTION_THRESHOLD` (default 0.015) are kept. The first frame is always kept.
-8. Kept frames are already at target resolution; they are JPEG-encoded (quality 85) and base64-encoded.
-9. All frame images are sent together in a single `POST {OLLAMA_HOST}/api/chat` request with `num_ctx` set to `OLLAMA_NUM_CTX` (default 8192).
+8. Kept frames are already at target resolution; they are JPEG-encoded (quality 85) and base64-encoded. The wall-clock span between the first and last kept frame is computed from candidate sample indices × `ANALYSIS_MOTION_SAMPLE_RATE`.
+9. The prompt is prefixed with timing context (e.g. "These are 5 frames in chronological order spanning 12 seconds of video.") via `_prompt_with_timing()`, then all frame images are sent together in a single `POST {OLLAMA_HOST}/api/chat` request with `num_ctx` set to `OLLAMA_NUM_CTX` (default 8192).
 10. The Ollama response text is stored via `update_analysis(event_id, "done", ...)`.
 11. The temporary working directory (MP4 + extracted frames) is cleaned up.
 
@@ -40,19 +40,27 @@ Helper functions in `app/database.py`:
 - `get_analysis(event_id)` -- single event lookup.
 - `get_analyses_for_events(event_ids)` -- batch lookup, returns dict keyed by event_id.
 - `update_analysis(event_id, status, analysis, model)` -- upserts: updates existing row or inserts new one.
+- `delete_analysis(event_id)` -- removes the stored result; used by the retry endpoint so polling reports `pending` instead of the stale outcome.
 - `get_event_by_id(event_id)` -- returns event row (id, timestamp, event_type).
 - `get_intrusion_event_ids_without_analysis(max_age_days)` -- events with no analysis row or status='failed' (for backfill on startup; failed are retried).
 
 ## AnalysisWorker (app/analysis.py)
 
-- Single daemon thread, `queue.Queue[int]`, in-memory `_queue_contents` (list of {event_id, created_at}) for API, `threading.Event` for stop.
-- `get_queue_size()` / `get_queue_contents()`: return count and snapshot of in-memory queue (no DB).
-- `enqueue(event_id)`: adds to in-memory queue only; skips if already queued.
+- Single daemon thread, `queue.Queue[int]`, in-memory `_queue_contents` (list of {event_id, created_at}) for API, `_processing` set of in-flight ids, `threading.Event` for stop.
+- `get_queue_size()` / `get_queue_contents()`: return count and snapshot of in-memory queue (no DB). In-flight events are not in the queue.
+- `enqueue(event_id)`: adds to in-memory queue only; skips if already queued or currently being processed.
 - `start()`: launches thread, then calls `_backfill()`.
 - `_backfill()`: in-memory queue only; enqueues intrusion events from last 7 days that have no analysis or have failed analysis.
 - `_process_one(event_id)`: polls for video via `match_media_for_events()`, converts DAV to MP4, extracts motion-filtered frames (already scaled to `ANALYSIS_FRAME_WIDTH` by ffmpeg), encodes as JPEG base64, calls Ollama `/api/chat` with multi-image payload and `num_ctx`, stores result.
-- Video polling sleeps 2s between checks up to `ANALYSIS_VIDEO_WAIT`.
+- `_run()` moves the id from `_queue_contents` into `_processing` before dispatching and clears it in a `finally`, so a crash cannot leave the id permanently blocked.
+- Video polling always performs at least one check, then sleeps 2s between retries until the age-aware budget is exhausted.
 - On any failure (no video, conversion error, no frames, API error), marks analysis as `failed`.
+
+### Age-aware video wait
+
+`_video_wait_seconds(timestamp)` returns `ANALYSIS_VIDEO_WAIT - event_age`, clamped to `[0, ANALYSIS_VIDEO_WAIT]`. An unparseable timestamp falls back to the full window.
+
+The camera needs up to `ANALYSIS_VIDEO_WAIT` to finish recording and upload the DAV; after that the file either exists or never will. Without this, every attempt on an event that has no recording held the single worker for the full 300 s -- head-of-line blocking that starved analysis of live intrusions.
 
 ### Frame extraction pipeline (resize-first workflow)
 
@@ -79,7 +87,7 @@ Endpoint: `POST {OLLAMA_HOST}/api/chat`
   "options": {"num_ctx": 8192},
   "messages": [{
     "role": "user",
-    "content": "OLLAMA_PROMPT value",
+    "content": "These are N frames in chronological order spanning M seconds of video. <OLLAMA_PROMPT>",
     "images": ["<base64-frame-1>", "<base64-frame-2>", "..."]
   }]
 }
@@ -87,11 +95,16 @@ Endpoint: `POST {OLLAMA_HOST}/api/chat`
 
 Requires a vision-capable model (e.g. `qwen3-vl:8b`, `llava`). Text-only models will fail.
 
+The timing prefix is built by `_prompt_with_timing(n_frames, span_secs)`. For a single frame it says "This is 1 frame from the video." Span is the difference between the first and last kept candidate offsets (not `n_frames × sample_rate`), so skipped near-duplicate frames do not inflate the reported duration.
+
 ## API endpoints
 
 - `GET /api/intrusions?date=YYYY-MM-DD` -- enriched response includes `analysis_status`, `analysis`, `analysis_model` per event (from `get_analyses_for_events`).
 - `GET /api/intrusions/analysis/queue` -- returns `{ pending: [{ event_id, created_at, event_timestamp }, ...], queue_size }` from the in-memory queue (items waiting for LLM analysis).
-- `GET /api/intrusions/analysis/{event_id}` -- returns `{event_id, status, analysis, model}`. If no analysis exists yet (or previously failed), enqueues the event for analysis and returns status `pending` (lazy trigger).
+- `GET /api/intrusions/analysis/{event_id}` -- returns `{event_id, status, analysis, model}`. Reports the stored status verbatim, **including `failed`**. Only when no analysis row exists is the event enqueued and status `pending` returned (lazy trigger for events older than the backfill window).
+- `POST /api/intrusions/analysis/{event_id}/retry` -- explicit re-run: deletes the stored row, enqueues the event, returns status `pending`. 404 for a non-intrusion or unknown event, 503 when the worker is not running.
+
+> **Do not re-enqueue failed analyses from the GET handler.** The modal polls that endpoint every 3 s; re-queueing on read means an event that can never succeed is retried forever, and each attempt occupies the single worker while the UI shows a permanent "Analyzing…" spinner. Retrying is a user action.
 
 ## Frontend (app/static/index.html)
 
@@ -102,6 +115,7 @@ Requires a vision-capable model (e.g. `qwen3-vl:8b`, `llava`). Text-only models 
 ### Tile badges
 - Green `badge-ai` when `analysis_status === 'done'`.
 - Pulsing yellow `badge-ai-pending` when `pending` or `processing`.
+- Red `badge-ai-failed` when `failed` (tooltip points at the retry in the modal).
 - No badge when analysis is absent.
 
 ### Modal
@@ -109,9 +123,9 @@ Requires a vision-capable model (e.g. `qwen3-vl:8b`, `llava`). Text-only models 
 - `renderModalAnalysis(ev)` renders the analysis section below the media:
   - Done: text in `modal-analysis-text`.
   - Pending/processing: spinner with "Analyzing...".
-  - Failed: italic "Analysis failed".
-- Polls `/api/intrusions/analysis/{id}` every 3s while status is pending/processing; stops on done/failed.
-- Poll timer cleared in `closeModal()`.
+  - Failed: italic "Analysis failed" plus a "Retry analysis" button wired to `retryAnalysis(ev)`.
+- `startAnalysisPoll(ev)` / `stopAnalysisPoll()` own the 3s poll of `/api/intrusions/analysis/{id}`; polling runs only while status is pending/processing and stops on done/failed. `startAnalysisPoll` clears any existing timer first, and `openModal()` stops the timer up front, so navigating straight from one event to another cannot leak an interval.
+- `retryAnalysis(ev)` POSTs to the retry endpoint, shows the spinner optimistically, and restarts polling; on HTTP failure it reverts to the failed state.
 
 ## Environment variables
 
@@ -122,7 +136,7 @@ Requires a vision-capable model (e.g. `qwen3-vl:8b`, `llava`). Text-only models 
 | `OLLAMA_PROMPT` | (video frame analysis prompt) | Prompt sent with extracted frames |
 | `OLLAMA_TIMEOUT` | `600` | HTTP timeout for Ollama request |
 | `OLLAMA_NUM_CTX` | `8192` | Context window size for Ollama |
-| `ANALYSIS_VIDEO_WAIT` | `300` | Seconds to wait for video file to appear on disk |
+| `ANALYSIS_VIDEO_WAIT` | `300` | Seconds after the event during which the worker waits for the video file to appear on disk (budget shrinks with event age) |
 | `ANALYSIS_FRAME_WIDTH` | `512` | Max width (px) for frames sent to LLM |
 | `ANALYSIS_MOTION_THRESHOLD` | `0.015` | Min pixel diff (0-1) to keep a frame; lower = more frames |
 | `ANALYSIS_MOTION_SAMPLE_RATE` | `0.5` | Interval (seconds) between candidate frame samples |
@@ -134,13 +148,14 @@ The `trafficstats` container joins the external `ollama` Docker network (hardcod
 
 ## Key design decisions
 
-- **Video-based analysis**: instead of analyzing a single snapshot, motion-significant frames are extracted from the video recording and sent as a multi-image prompt, giving the LLM temporal context.
+- **Video-based analysis**: instead of analyzing a single snapshot, motion-significant frames are extracted from the video recording and sent as a multi-image prompt, giving the LLM temporal context. The text prompt states frame count and wall-clock span so the model knows the images are ordered in time and how long the clip covers.
 - **Motion filtering**: avoids sending redundant near-identical frames; the threshold + sample rate balance frame count vs. information density.
 - **Non-blocking**: `enqueue()` is fire-and-forget; the camera listener thread is never blocked by LLM inference.
 - **Single worker thread**: serializes Ollama calls to avoid overloading the GPU. Queue is unbounded.
 - **In-memory queue**: queue is not persisted; on restart it is repopulated from events without analysis or with failed analysis in the last 7 days.
 - **Backfill on startup**: events from the last 7 days with no analysis or with failed analysis are enqueued into the in-memory queue.
 - **Lazy trigger via API**: opening the modal for an old event (no analysis row) triggers analysis on demand.
-- **Video polling**: the DAV file may not exist yet when the event fires (camera is still recording + FTP upload delay). The worker retries every 2s up to `ANALYSIS_VIDEO_WAIT`.
-- **Graceful failure**: if the video never arrives, conversion fails, or Ollama errors, the analysis is marked `failed` and the UI shows this.
+- **Explicit retry**: a `failed` status is terminal until the user asks for a re-run (or the next startup backfill). Reads never re-queue work, which keeps a permanently unanalysable event from monopolising the worker.
+- **Video polling**: the DAV file may not exist yet when the event fires (camera is still recording + FTP upload delay). The worker retries every 2s within the age-aware budget.
+- **Graceful failure**: if the video never arrives, conversion fails, or Ollama errors, the analysis is marked `failed` and the UI shows this with a retry action.
 - **Temp cleanup**: temporary MP4 and extracted frames are cleaned up after each analysis run.

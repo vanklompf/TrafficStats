@@ -363,6 +363,10 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.6; }
     }
+    .badge-ai-failed {
+      background: rgba(248, 113, 113, .18);
+      color: #f87171;
+    }
 
     .empty-state {
       text-align: center;
@@ -540,6 +544,9 @@
     .modal-analysis-failed {
       color: var(--text-dim);
       font-style: italic;
+    }
+    .analysis-retry-btn {
+      margin-top: .5rem;
     }
 
     /* --- Live tab --- */
@@ -1283,6 +1290,12 @@
             aiBadge.textContent = 'AI';
             aiBadge.title = 'Analysis in progress';
             badges.appendChild(aiBadge);
+          } else if (ev.analysis_status === 'failed') {
+            const aiBadge = document.createElement('span');
+            aiBadge.className = 'badge badge-ai-failed';
+            aiBadge.textContent = 'AI';
+            aiBadge.title = 'Analysis failed — open to retry';
+            badges.appendChild(aiBadge);
           }
           meta.appendChild(badges);
           tile.appendChild(meta);
@@ -1323,9 +1336,54 @@
       } else if (status === 'pending' || status === 'processing') {
         modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-loading">Analyzing…</div>';
       } else if (status === 'failed') {
-        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-failed">Analysis failed</div>';
+        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4>' +
+          '<div class="modal-analysis-failed">Analysis failed</div>' +
+          '<button type="button" class="modal-link-btn analysis-retry-btn">Retry analysis</button>';
+        modalAnalysisEl.querySelector('.analysis-retry-btn')
+          .addEventListener('click', () => retryAnalysis(ev));
       } else {
         modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-failed">No analysis</div>';
+      }
+    }
+
+    function stopAnalysisPoll() {
+      if (modalAnalysisPollId) {
+        clearInterval(modalAnalysisPollId);
+        modalAnalysisPollId = null;
+      }
+    }
+
+    function startAnalysisPoll(ev) {
+      stopAnalysisPoll();
+      if (!ev.id) return;
+      if (ev.analysis_status !== 'pending' && ev.analysis_status !== 'processing') return;
+      modalAnalysisPollId = setInterval(async () => {
+        try {
+          const r = await fetch('/api/intrusions/analysis/' + ev.id);
+          if (!r.ok) return;
+          const data = await r.json();
+          ev.analysis_status = data.status;
+          ev.analysis = data.analysis;
+          ev.analysis_model = data.model;
+          renderModalAnalysis(ev);
+          if (data.status === 'done' || data.status === 'failed') stopAnalysisPoll();
+        } catch (_) {}
+      }, 3000);
+    }
+
+    async function retryAnalysis(ev) {
+      if (!ev.id) return;
+      ev.analysis_status = 'pending';
+      ev.analysis = null;
+      renderModalAnalysis(ev);
+      try {
+        const r = await fetch('/api/intrusions/analysis/' + ev.id + '/retry', { method: 'POST' });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        startAnalysisPoll(ev);
+      } catch (err) {
+        console.error('Analysis retry failed:', err);
+        ev.analysis_status = 'failed';
+        renderModalAnalysis(ev);
       }
     }
 
@@ -1336,6 +1394,7 @@
     }
 
     async function openModal(ev, cameraTimezone) {
+      stopAnalysisPoll();
       currentModalEventId = ev.id || null;
       if (currentModalEventId) {
         suppressHashChange = true;
@@ -1396,31 +1455,14 @@
       }
 
       renderModalAnalysis(ev);
-
-      if ((ev.analysis_status === 'pending' || ev.analysis_status === 'processing') && ev.id) {
-        modalAnalysisPollId = setInterval(async () => {
-          try {
-            const r = await fetch('/api/intrusions/analysis/' + ev.id);
-            if (!r.ok) return;
-            const data = await r.json();
-            ev.analysis_status = data.status;
-            ev.analysis = data.analysis;
-            ev.analysis_model = data.model;
-            renderModalAnalysis(ev);
-            if (data.status === 'done' || data.status === 'failed') clearInterval(modalAnalysisPollId);
-          } catch (_) {}
-        }, 3000);
-      }
+      startAnalysisPoll(ev);
 
       modalOverlay.classList.add('open');
     }
 
     function closeModal() {
       currentModalEventId = null;
-      if (modalAnalysisPollId) {
-        clearInterval(modalAnalysisPollId);
-        modalAnalysisPollId = null;
-      }
+      stopAnalysisPoll();
       modalOverlay.classList.remove('open');
       const vid = modalBody.querySelector('video');
       if (vid) { vid.pause(); vid.src = ''; }
