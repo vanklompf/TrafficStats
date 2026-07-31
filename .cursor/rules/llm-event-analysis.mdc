@@ -15,7 +15,7 @@ Intrusion events detected by the Dahua camera are automatically analyzed by a lo
 1. `DahuaListener._process_line()` (in `app/dahua.py`) detects an intrusion IVS event.
 2. Calls `insert_event(event_type="intrusion")` which returns the new `event_id` (int or None if debounced).
 3. If event was inserted, calls `self.on_intrusion_registered(event_id)` -- a callback wired to `AnalysisWorker.enqueue()`.
-4. `enqueue()` puts the event id on an in-memory `queue.Queue` and appends to `_queue_contents` for the queue API. No DB persistence for the queue; it is lost on app restart and repopulated from unprocessed events (last 7 days). Events already queued *or currently being processed* are ignored, so repeated triggers cannot stack duplicate runs.
+4. `enqueue()` puts the event id on an in-memory `queue.Queue` and appends to `_queue_contents` for the queue API. No DB persistence for the queue; it is lost on app restart and repopulated from unprocessed events (last `ANALYSIS_BACKFILL_DAYS` days, default 3). Events already queued *or currently being processed* are ignored, so repeated triggers cannot stack duplicate runs.
 5. The single worker thread picks up the id and polls for the video file (DAV recording). The polling budget is `ANALYSIS_VIDEO_WAIT` (default 300) **minus the event's age**: a fresh event gets the full window, while an event queued long after it fired (backfill, lazy trigger, retry) gets a single check. See "Age-aware video wait" below.
 6. The DAV file is converted to MP4 in a temporary directory using ffmpeg.
 7. Frames are sampled every `ANALYSIS_MOTION_SAMPLE_RATE` seconds (default 0.25) and scaled to `ANALYSIS_FRAME_WIDTH` px width via ffmpeg, then filtered by motion: each candidate frame is compared to the previous kept frame by mean pixel difference (optionally restricted by a motion mask); only frames with difference >= `ANALYSIS_MOTION_THRESHOLD` (default 0.015) are kept. The first frame is always kept.
@@ -50,7 +50,7 @@ Helper functions in `app/database.py`:
 - `get_queue_size()` / `get_queue_contents()`: return count and snapshot of in-memory queue (no DB). In-flight events are not in the queue.
 - `enqueue(event_id)`: adds to in-memory queue only; skips if already queued or currently being processed.
 - `start()`: launches thread, then calls `_backfill()`.
-- `_backfill()`: in-memory queue only; enqueues intrusion events from last 7 days that have no analysis or have failed analysis.
+- `_backfill()`: in-memory queue only; enqueues intrusion events from the last `ANALYSIS_BACKFILL_DAYS` days (default 3) that have no analysis or have failed analysis.
 - `_process_one(event_id)`: polls for video via `match_media_for_events()`, converts DAV to MP4, extracts motion-filtered frames (already scaled to `ANALYSIS_FRAME_WIDTH` by ffmpeg), encodes as JPEG base64, calls Ollama `/api/chat` with multi-image payload and `num_ctx`, stores result.
 - `_run()` moves the id from `_queue_contents` into `_processing` before dispatching and clears it in a `finally`, so a crash cannot leave the id permanently blocked.
 - Video polling always performs at least one check, then sleeps 2s between retries until the age-aware budget is exhausted.
@@ -141,6 +141,7 @@ The timing prefix is built by `_prompt_with_timing(n_frames, span_secs)`. For a 
 | `ANALYSIS_MOTION_THRESHOLD` | `0.015` | Min pixel diff (0-1) to keep a frame; lower = more frames |
 | `ANALYSIS_MOTION_SAMPLE_RATE` | `0.5` | Interval (seconds) between candidate frame samples |
 | `ANALYSIS_MOTION_MASK` | (bundled `app/masks/maska.png`) | Path to motion mask image; set to `none` to disable |
+| `ANALYSIS_BACKFILL_DAYS` | `3` | On startup, requeue unprocessed/failed intrusion events from this many recent days |
 
 ## Docker networking
 
@@ -152,8 +153,8 @@ The `trafficstats` container joins the external `ollama` Docker network (hardcod
 - **Motion filtering**: avoids sending redundant near-identical frames; the threshold + sample rate balance frame count vs. information density.
 - **Non-blocking**: `enqueue()` is fire-and-forget; the camera listener thread is never blocked by LLM inference.
 - **Single worker thread**: serializes Ollama calls to avoid overloading the GPU. Queue is unbounded.
-- **In-memory queue**: queue is not persisted; on restart it is repopulated from events without analysis or with failed analysis in the last 7 days.
-- **Backfill on startup**: events from the last 7 days with no analysis or with failed analysis are enqueued into the in-memory queue.
+- **In-memory queue**: queue is not persisted; on restart it is repopulated from events without analysis or with failed analysis in the last `ANALYSIS_BACKFILL_DAYS` days (default 3).
+- **Backfill on startup**: events from the last `ANALYSIS_BACKFILL_DAYS` days with no analysis or with failed analysis are enqueued into the in-memory queue.
 - **Lazy trigger via API**: opening the modal for an old event (no analysis row) triggers analysis on demand.
 - **Explicit retry**: a `failed` status is terminal until the user asks for a re-run (or the next startup backfill). Reads never re-queue work, which keeps a permanently unanalysable event from monopolising the worker.
 - **Video polling**: the DAV file may not exist yet when the event fires (camera is still recording + FTP upload delay). The worker retries every 2s within the age-aware budget.

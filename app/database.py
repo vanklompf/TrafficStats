@@ -503,7 +503,7 @@ def get_intrusion_event_ids_without_analysis(max_age_days: int | None = None) ->
 
     Includes events with no event_analysis row and events with status='failed', so failed
     analyses are requeued on startup. If max_age_days is set, only return events with
-    timestamp within that many days (e.g. 7 = last 7 days). Use None for all.
+    timestamp within that many days (e.g. 3 = last 3 days). Use None for all.
     """
     conn = _get_conn()
     sql = """
