@@ -4,7 +4,7 @@ Background analysis of intrusion event videos using a local Ollama vision model.
 Events are queued in memory after registration; a single worker thread waits
 for the video recording to finish uploading, extracts motion-significant frames,
 sends them to Ollama, and stores the result in the database.
-Queue is repopulated on startup from unprocessed events in the last 3 days.
+Queue is repopulated on startup from all unprocessed/failed intrusion events.
 """
 
 import base64
@@ -50,7 +50,13 @@ ANALYSIS_FRAME_WIDTH = int(os.environ.get("ANALYSIS_FRAME_WIDTH", "512"))
 ANALYSIS_MOTION_THRESHOLD = float(os.environ.get("ANALYSIS_MOTION_THRESHOLD", "0.015"))
 ANALYSIS_MOTION_SAMPLE_RATE = float(os.environ.get("ANALYSIS_MOTION_SAMPLE_RATE", "0.5"))
 ANALYSIS_MOTION_MASK = os.environ.get("ANALYSIS_MOTION_MASK", "")
-ANALYSIS_BACKFILL_DAYS = int(os.environ.get("ANALYSIS_BACKFILL_DAYS", "3"))
+# Optional age cap for startup backfill. Unset or 0 = no limit (all eligible events).
+_backfill_days_raw = os.environ.get("ANALYSIS_BACKFILL_DAYS", "").strip()
+ANALYSIS_BACKFILL_DAYS: int | None = None
+if _backfill_days_raw:
+    _backfill_days_val = int(_backfill_days_raw)
+    if _backfill_days_val > 0:
+        ANALYSIS_BACKFILL_DAYS = _backfill_days_val
 
 _DEFAULT_MASK_PATH = Path(__file__).parent / "masks" / "maska.png"
 
@@ -310,8 +316,9 @@ def _convert_dav_to_mp4_temp(dav_path: Path, output_dir: Path) -> Path | None:
 class AnalysisWorker:
     """Single-threaded worker that processes intrusion events for LLM analysis.
 
-    Queue is kept in memory only; on startup it is filled from events without
-    analysis in the last ``ANALYSIS_BACKFILL_DAYS`` days (default 3).
+    Queue is kept in memory only; on startup it is filled from all intrusion
+    events without analysis or with failed analysis. Set
+    ``ANALYSIS_BACKFILL_DAYS`` to optionally limit that window.
     """
 
     def __init__(self):
@@ -374,7 +381,7 @@ class AnalysisWorker:
         logger.info("[AI] Analysis worker stopped")
 
     def _backfill(self) -> None:
-        """Queue intrusion events from the recent backfill window that have no analysis."""
+        """Queue intrusion events that have no analysis or failed analysis."""
         try:
             ids = get_intrusion_event_ids_without_analysis(
                 max_age_days=ANALYSIS_BACKFILL_DAYS,
@@ -387,10 +394,16 @@ class AnalysisWorker:
                     self._queue_contents.append({"event_id": event_id, "created_at": now})
                     self._queue.put_nowait(event_id)
             if ids:
-                logger.info(
-                    "[AI] Backfill: queued %d intrusion event(s) from last %d day(s)",
-                    len(ids), ANALYSIS_BACKFILL_DAYS,
-                )
+                if ANALYSIS_BACKFILL_DAYS is not None:
+                    logger.info(
+                        "[AI] Backfill: queued %d intrusion event(s) from last %d day(s)",
+                        len(ids), ANALYSIS_BACKFILL_DAYS,
+                    )
+                else:
+                    logger.info(
+                        "[AI] Backfill: queued %d intrusion event(s) (no age limit)",
+                        len(ids),
+                    )
         except Exception as e:
             logger.exception("[AI] Backfill failed: %s", e)
 

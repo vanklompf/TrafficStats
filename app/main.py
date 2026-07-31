@@ -287,8 +287,7 @@ def api_intrusion_analysis(event_id: int):
     action (see the /retry endpoint) -- doing it here would let an event that
     can never succeed re-enter the queue on every poll and starve the worker.
 
-    When no analysis row exists the event is queued once, which lazily covers
-    events older than the startup backfill window.
+    When no analysis row exists the event is queued once (lazy on-demand trigger).
     """
     analysis = get_analysis(event_id)
     if analysis is not None:
