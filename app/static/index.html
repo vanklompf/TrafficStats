@@ -50,6 +50,27 @@
       letter-spacing: -0.02em;
     }
 
+    .auth-bar {
+      display: none;
+      align-items: center;
+      gap: .75rem;
+      color: var(--text-dim);
+      font-size: .875rem;
+    }
+    .auth-bar.visible { display: flex; }
+    .auth-bar a {
+      color: var(--text-dim);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: .35rem .8rem;
+      transition: all .15s ease;
+    }
+    .auth-bar a:hover {
+      border-color: var(--accent);
+      color: var(--text);
+    }
+
     .controls {
       display: flex;
       gap: .5rem;
@@ -649,6 +670,10 @@
   <div class="container">
     <header>
       <h1>Traffic Stats</h1>
+      <div class="auth-bar" id="auth-bar">
+        <span id="auth-user"></span>
+        <a href="/auth/logout">Sign out</a>
+      </div>
     </header>
 
     <!-- Tab bar -->
@@ -1657,6 +1682,19 @@
     // -----------------------------------------------------------------------
     // Init
     // -----------------------------------------------------------------------
+    fetch('/api/auth/me').then(r => {
+      if (r.status === 401) {
+        location.href = '/auth/login?next=' + encodeURIComponent(location.pathname + location.search + location.hash);
+        return null;
+      }
+      return r.ok ? r.json() : null;
+    }).then(data => {
+      if (!data || !data.oidc_enabled || !data.user) return;
+      const label = data.user.name || data.user.email || data.user.preferred_username || '';
+      document.getElementById('auth-user').textContent = label;
+      document.getElementById('auth-bar').classList.add('visible');
+    }).catch(() => {});
+
     initChart();
     fetchData();
     setInterval(() => {

@@ -28,8 +28,27 @@ Edit `.env`:
 | `CITY` | City name for location (e.g. `Helsinki`, `London, UK`). Lat/lon and timezone are looked up automatically. | — |
 | `INTRUSION_MEDIA_PATH` | Container path where camera FTP uploads are mounted | `/media` |
 | `VIDEO_CACHE_MAX_GB` | Max disk space for converted video cache | `20` |
+| `OIDC_ENABLED` | Require OpenID Connect login (Authentik, etc.) | unset/false |
+| `OIDC_CLIENT_ID` | OAuth client ID | — |
+| `OIDC_CLIENT_SECRET` | OAuth client secret | — |
+| `OIDC_ISSUER_URL` | Provider issuer URL (with trailing slash) | — |
+| `APP_URL` | Public base URL of this app (redirect URI + Secure cookies) | — |
+| `SESSION_SECRET` | Cookie signing key (required when OIDC is on in production) | ephemeral |
+| `OIDC_AUTO_LOGIN` | Redirect browsers straight to the IdP when unauthenticated | `true` |
 
 When **CITY** is set, traffic events are only recorded between sunrise and sunset at that location. The chart shows shaded bands for periods when no collection is done (night). Intrusion events are always recorded regardless of time.
+
+## Single Sign-On (OIDC)
+
+Set `OIDC_ENABLED=true` and point `OIDC_ISSUER_URL` / client credentials at your IdP. The callback path is:
+
+```
+{APP_URL}/auth/oidc/callback
+```
+
+`/api/health` stays public for container health checks. When OIDC is off, the app behaves as before (no login).
+
+With the ansible-nas Authentik role, enable `trafficstats_oidc_enabled: true` — the role templates the OAuth2 provider/application blueprint and injects the env vars.
 
 ## Dahua camera setup
 

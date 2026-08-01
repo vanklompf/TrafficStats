@@ -1,6 +1,8 @@
 fastapi==0.129.0
 uvicorn==0.40.0
 httpx==0.28.1
+authlib==1.7.2
+itsdangerous==2.2.0
 astral==3.2
 geopy==2.4.1
 timezonefinder==8.2.1

@@ -21,10 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.sessions import SessionMiddleware
 
+from app import auth as auth_mod
 from app.database import (
     init_db,
     close_conn,
@@ -106,8 +108,76 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TrafficStats", lifespan=lifespan)
 
+_oauth = auth_mod.build_oauth()
+
 # Mount static files (CSS/JS assets if any)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.middleware("http")
+async def require_oidc_session(request: Request, call_next):
+    """Gate all routes behind OIDC when enabled."""
+    if not auth_mod.oidc_enabled() or _oauth is None:
+        return await call_next(request)
+    if auth_mod.is_public_path(request.url.path):
+        return await call_next(request)
+    if auth_mod.current_user(request) is not None:
+        return await call_next(request)
+    return auth_mod.unauthorized_response(request)
+
+
+# SessionMiddleware is added last so it is outermost and populates
+# request.session before the auth gate runs. SameSite=lax works with the
+# Authentik redirect; cookies are Secure when APP_URL is https.
+_app_url = auth_mod.app_url()
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=auth_mod.session_secret(),
+    session_cookie="trafficstats_session",
+    same_site="lax",
+    https_only=_app_url.startswith("https://"),
+    max_age=60 * 60 * 24 * 7,
+)
+
+
+# ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
+
+
+@app.get("/auth/login")
+async def auth_login(request: Request):
+    """Start the OIDC authorization-code flow."""
+    if not auth_mod.oidc_enabled() or _oauth is None:
+        raise HTTPException(status_code=404, detail="OIDC is not enabled")
+    return await auth_mod.login(request, _oauth)
+
+
+@app.get("/auth/oidc/callback")
+async def auth_oidc_callback(request: Request):
+    """Handle the OIDC provider redirect."""
+    if not auth_mod.oidc_enabled() or _oauth is None:
+        raise HTTPException(status_code=404, detail="OIDC is not enabled")
+    return await auth_mod.callback(request, _oauth)
+
+
+@app.get("/auth/logout")
+async def auth_logout(request: Request):
+    """Clear the local session and optionally end the IdP session."""
+    if not auth_mod.oidc_enabled():
+        raise HTTPException(status_code=404, detail="OIDC is not enabled")
+    return await auth_mod.logout(request, _oauth)
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    """Return the signed-in user, or auth-disabled status for the UI."""
+    if not auth_mod.oidc_enabled():
+        return {"authenticated": False, "oidc_enabled": False, "user": None}
+    user = auth_mod.current_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return {"authenticated": True, "oidc_enabled": True, "user": user}
 
 
 # ---------------------------------------------------------------------------
