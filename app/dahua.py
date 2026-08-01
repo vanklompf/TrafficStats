@@ -10,7 +10,9 @@ import json
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -26,6 +28,47 @@ EVENT_URL_TEMPLATE = (
 # Reconnect timing
 INITIAL_BACKOFF = 2  # seconds
 MAX_BACKOFF = 60
+
+
+def _first_value(data: dict, *keys: str):
+    """Return the first source field found at the event or object level."""
+    objects = (data, data.get("Object", {}))
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for key in keys:
+            value = obj.get(key)
+            if value is not None and value != "":
+                return value
+    return None
+
+
+def _source_timestamp(value, *, assume_utc: bool) -> str | None:
+    """Normalize a Dahua UTC/epoch timestamp for SQLite and media matching."""
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, (int, float)) or str(value).isdigit():
+            number = float(value)
+            if number > 10_000_000_000:
+                number /= 1000
+            parsed = datetime.fromtimestamp(number, timezone.utc)
+        else:
+            text = str(value).strip().replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                source_tz = timezone.utc
+                if not assume_utc:
+                    try:
+                        source_tz = ZoneInfo(os.environ.get("TZ", "UTC"))
+                    except Exception:
+                        logger.warning("Invalid TZ while parsing camera EventTime; using UTC")
+                parsed = parsed.replace(tzinfo=source_tz)
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError, OSError, OverflowError):
+        logger.debug("Ignoring unrecognized camera timestamp %r", value)
+        return None
 
 
 class DahuaListener:
@@ -160,6 +203,7 @@ class DahuaListener:
 
         direction = ""
         ivs_name = ""
+        data = {}
         if "data" in alarm:
             try:
                 data = json.loads(alarm["data"])
@@ -183,6 +227,19 @@ class DahuaListener:
             return
 
         camera_name = f"{self.host}"
+        source_event_id = _first_value(data, "EventID", "EventId")
+        source_sequence = _first_value(data, "Sequence")
+        if source_event_id is None:
+            source_event_id = source_sequence
+        utc_value = _first_value(data, "UTC")
+        source_time = _source_timestamp(
+            utc_value if utc_value is not None else _first_value(data, "EventTime"),
+            assume_utc=utc_value is not None,
+        )
+        channel = _first_value(data, "Channel")
+        source_index = alarm.get("index")
+        if channel is None:
+            channel = source_index
         logger.info(
             "Event: type=%s code=%s name=%s direction=%s camera=%s",
             event_type, code, ivs_name, direction, camera_name,
@@ -192,6 +249,10 @@ class DahuaListener:
             direction=direction,
             event_type=event_type,
             ivs_name=ivs_name,
+            source_event_id=str(source_event_id) if source_event_id is not None else None,
+            source_sequence=str(source_sequence) if source_sequence is not None else None,
+            source_timestamp=source_time,
+            channel=str(channel) if channel is not None else None,
         )
         if event_type == "intrusion" and event_id is not None and self.on_intrusion_registered is not None:
             self.on_intrusion_registered(event_id)

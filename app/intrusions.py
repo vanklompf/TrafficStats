@@ -141,12 +141,17 @@ def _camera_to_utc(naive_dt: datetime) -> datetime:
     utc_aware = aware.astimezone(timezone.utc)
     return utc_aware.replace(tzinfo=None)
 
-# Regex for JPG filenames: 001_YYYYMMDDHHmmss_[TYPE][0@0][0].jpg
-_JPG_RE = re.compile(r"^\d+_(\d{14})_\[.*\].*\.jpg$", re.IGNORECASE)
+# Regex for JPG filenames: 001_YYYYMMDDHHmmss_[TYPE][CHANNEL@STREAM][INDEX].jpg
+_JPG_RE = re.compile(
+    r"^(\d+)_(\d{14})_\[([^\]]*)\]"
+    r"(?:\[([^\]@]*)@([^\]]*)\])?(?:\[([^\]]*)\])?\.jpg$",
+    re.IGNORECASE,
+)
 
-# Regex for DAV filenames: HH.MM.SS-HH.MM.SS[TYPE][0@0][0].dav
+# Regex for DAV filenames: HH.MM.SS-HH.MM.SS[TYPE][CHANNEL@STREAM][INDEX].dav
 _DAV_RE = re.compile(
-    r"^(\d{2})\.(\d{2})\.(\d{2})-(\d{2})\.(\d{2})\.(\d{2})\[.*\].*\.dav$",
+    r"^(\d{2})\.(\d{2})\.(\d{2})-(\d{2})\.(\d{2})\.(\d{2})"
+    r"\[([^\]]*)\](?:\[([^\]@]*)@([^\]]*)\])?(?:\[([^\]]*)\])?\.dav$",
     re.IGNORECASE,
 )
 
@@ -213,21 +218,42 @@ def wait_for_stable_file(
             time.sleep(wait_seconds)
 
 
-def _parse_jpg_timestamp(filename: str) -> datetime | None:
-    """Extract naive datetime from a JPG filename (camera-local time)."""
+def _normalize_channel(value) -> str | None:
+    if value is None or value == "":
+        return None
+    text = str(value)
+    return str(int(text)) if text.isdigit() else text
+
+
+def _parse_jpg_metadata(
+    filename: str,
+) -> tuple[datetime, str, str | None, str | None, str | None] | None:
+    """Extract camera-local time and bracketed media identity from a JPG."""
     m = _JPG_RE.match(filename)
     if not m:
         return None
     try:
-        return datetime.strptime(m.group(1), "%Y%m%d%H%M%S")
+        return (
+            datetime.strptime(m.group(2), "%Y%m%d%H%M%S"),
+            m.group(3),
+            _normalize_channel(m.group(4)),
+            m.group(5),
+            m.group(6),
+        )
     except ValueError:
         return None
 
 
-def _parse_dav_time_range(
-    filename: str, date_str: str
-) -> tuple[datetime, datetime] | None:
-    """Extract (start, end) datetimes from a DAV filename + parent date dir."""
+def _parse_jpg_timestamp(filename: str) -> datetime | None:
+    """Extract naive datetime from a JPG filename (camera-local time)."""
+    metadata = _parse_jpg_metadata(filename)
+    return metadata[0] if metadata is not None else None
+
+
+def _parse_dav_metadata(
+    filename: str, date_str: str,
+) -> tuple[datetime, datetime, str, str | None, str | None, str | None] | None:
+    """Extract camera-local range and bracketed media identity from a DAV."""
     m = _DAV_RE.match(filename)
     if not m:
         return None
@@ -241,9 +267,20 @@ def _parse_dav_time_range(
         )
         if end < start:
             end += timedelta(days=1)
-        return start, end
+        return (
+            start, end, m.group(7), _normalize_channel(m.group(8)),
+            m.group(9), m.group(10),
+        )
     except (ValueError, TypeError):
         return None
+
+
+def _parse_dav_time_range(
+    filename: str, date_str: str
+) -> tuple[datetime, datetime] | None:
+    """Extract (start, end) datetimes from a DAV filename + parent date dir."""
+    metadata = _parse_dav_metadata(filename, date_str)
+    return metadata[:2] if metadata is not None else None
 
 
 def _list_date_dir(date_str: str) -> Path | None:
@@ -255,12 +292,12 @@ def _list_date_dir(date_str: str) -> Path | None:
 def _scan_media(
     base_date: date,
 ) -> tuple[
-    list[tuple[str, datetime, str]],
-    list[tuple[str, datetime, datetime, str]],
+    list[tuple[str, datetime, str, str, str | None, str | None, str | None]],
+    list[tuple[str, datetime, datetime, str, str, str | None, str | None, str | None]],
 ]:
     """Return timestamped JPG and DAV candidates around a camera-local date."""
-    jpgs: list[tuple[str, datetime, str]] = []
-    davs: list[tuple[str, datetime, datetime, str]] = []
+    jpgs = []
+    davs = []
 
     for delta in (-1, 0, 1):
         d = base_date + timedelta(days=delta)
@@ -273,17 +310,26 @@ def _scan_media(
         except OSError:
             continue
         for filename in files:
-            timestamp = _parse_jpg_timestamp(filename)
-            if timestamp is not None:
-                jpgs.append((filename, _camera_to_utc(timestamp), ds))
+            jpg = _parse_jpg_metadata(filename)
+            if jpg is not None:
+                timestamp, media_type, channel, stream, index = jpg
+                jpgs.append((
+                    filename, _camera_to_utc(timestamp), ds, media_type,
+                    channel, stream, index,
+                ))
                 continue
-            time_range = _parse_dav_time_range(filename, ds)
-            if time_range is not None:
+            dav = _parse_dav_metadata(filename, ds)
+            if dav is not None:
+                start, end, media_type, channel, stream, index = dav
                 davs.append((
                     filename,
-                    _camera_to_utc(time_range[0]),
-                    _camera_to_utc(time_range[1]),
+                    _camera_to_utc(start),
+                    _camera_to_utc(end),
                     ds,
+                    media_type,
+                    channel,
+                    stream,
+                    index,
                 ))
 
     jpgs.sort(key=lambda item: (item[1], item[2], item[0]))
@@ -293,14 +339,17 @@ def _scan_media(
 
 def _select_recording(
     event_utc: datetime,
-    recordings: list[tuple[str, datetime, datetime, str]],
-) -> tuple[str, datetime, datetime, str] | None:
+    recordings: list[tuple[str, datetime, datetime, str, str, str | None, str | None, str | None]],
+    channel: str | None = None,
+) -> tuple[str, datetime, datetime, str, str, str | None, str | None, str | None] | None:
     """Select the best recording deterministically, preferring containment."""
     tolerance = timedelta(seconds=MATCH_THRESHOLD_SECS)
     ranked = []
 
     for recording in recordings:
-        filename, start, end, date_str = recording
+        filename, start, end, date_str, _, media_channel, _, _ = recording
+        if channel is not None and media_channel is not None and channel != media_channel:
+            continue
         if event_utc < start - tolerance or event_utc > end + tolerance:
             continue
 
@@ -310,6 +359,7 @@ def _select_recording(
             abs((event_utc - end).total_seconds()),
         )
         ranked.append((
+            0 if channel is not None and channel == media_channel else 1,
             0 if contained else 1,
             boundary_distance,
             abs((event_utc - start).total_seconds()),
@@ -325,7 +375,7 @@ def _select_recording(
     return min(ranked, key=lambda item: item[:-1])[-1]
 
 
-def get_recording_end_utc(event_utc: datetime) -> datetime | None:
+def get_recording_end_utc(event_utc: datetime, channel: str | None = None) -> datetime | None:
     """Return the UTC end time of the video recording that covers *event_utc*.
 
     Scans DAV files around the camera-local event date and uses the same
@@ -340,7 +390,7 @@ def get_recording_end_utc(event_utc: datetime) -> datetime | None:
     base_date = event_local.date()
 
     _, recordings = _scan_media(base_date)
-    selected = _select_recording(event_utc, recordings)
+    selected = _select_recording(event_utc, recordings, _normalize_channel(channel))
     return selected[2] if selected is not None else None
 
 
@@ -360,38 +410,53 @@ def match_media_for_events(
         snapshot / video       – filename (or None)
         snapshot_date / video_date – date directory the file lives in
     """
-    base_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    if events:
-        first_event_utc = datetime.strptime(
-            events[0]["timestamp"], "%Y-%m-%d %H:%M:%S"
-        ).replace(tzinfo=timezone.utc)
-        base_date = first_event_utc.astimezone(_get_local_tz()).date()
-
-    jpgs, davs = _scan_media(base_date)
-
     results = []
+    scans = {}
     for ev in events:
-        ev_ts = datetime.strptime(ev["timestamp"], "%Y-%m-%d %H:%M:%S")
+        ev_ts = datetime.strptime(
+            ev.get("source_timestamp") or ev["timestamp"], "%Y-%m-%d %H:%M:%S"
+        )
+        event_local_date = ev_ts.replace(tzinfo=timezone.utc).astimezone(
+            _get_local_tz()
+        ).date()
+        if event_local_date not in scans:
+            scans[event_local_date] = _scan_media(event_local_date)
+        jpgs, davs = scans[event_local_date]
+        event_channel = _normalize_channel(ev.get("channel"))
 
         # Find closest JPG within threshold
         best_jpg = None
         best_jpg_date = None
-        best_jpg_dist = MATCH_THRESHOLD_SECS + 1
-        for fname, ts, ds in jpgs:
+        best_jpg_rank = None
+        for fname, ts, ds, _, media_channel, _, _ in jpgs:
+            if (
+                event_channel is not None and media_channel is not None
+                and event_channel != media_channel
+            ):
+                continue
             dist = abs((ts - ev_ts).total_seconds())
-            if dist < best_jpg_dist:
-                best_jpg_dist = dist
+            if dist > MATCH_THRESHOLD_SECS:
+                continue
+            rank = (
+                0 if event_channel is not None and event_channel == media_channel else 1,
+                dist,
+                ts,
+                fname,
+                ds,
+            )
+            if best_jpg_rank is None or rank < best_jpg_rank:
+                best_jpg_rank = rank
                 best_jpg = fname
                 best_jpg_date = ds
 
-        recording = _select_recording(ev_ts, davs)
+        recording = _select_recording(ev_ts, davs, event_channel)
         best_dav = recording[0] if recording is not None else None
         best_dav_date = recording[3] if recording is not None else None
 
         results.append({
             **ev,
-            "snapshot": best_jpg if best_jpg_dist <= MATCH_THRESHOLD_SECS else None,
-            "snapshot_date": best_jpg_date if best_jpg_dist <= MATCH_THRESHOLD_SECS else None,
+            "snapshot": best_jpg,
+            "snapshot_date": best_jpg_date,
             "video": best_dav,
             "video_date": best_dav_date,
         })

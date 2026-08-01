@@ -341,7 +341,7 @@ def api_intrusion_event(event_id: int):
 
     ts = event["timestamp"]
     date_str = ts[:10]
-    events = [{"id": event["id"], "timestamp": ts}]
+    events = [event]
     enriched = match_media_for_events(events, date_str)
     if not enriched:
         raise HTTPException(status_code=404, detail="Intrusion event not found")

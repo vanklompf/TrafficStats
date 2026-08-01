@@ -438,7 +438,7 @@ class AnalysisWorker:
 
         timestamp = event["timestamp"]
         date_str = timestamp[:10]
-        ev = [{"id": event_id, "timestamp": timestamp}]
+        ev = [event]
 
         # Wait for the video recording (DAV file) to appear on disk
         video_path = None

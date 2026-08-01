@@ -46,7 +46,11 @@ def init_db():
             camera TEXT NOT NULL DEFAULT '',
             direction TEXT NOT NULL DEFAULT '',
             event_type TEXT NOT NULL DEFAULT 'traffic',
-            ivs_name TEXT NOT NULL DEFAULT ''
+            ivs_name TEXT NOT NULL DEFAULT '',
+            source_event_id TEXT,
+            source_sequence TEXT,
+            source_timestamp TEXT,
+            channel TEXT
         )
     """)
     conn.execute("""
@@ -60,6 +64,9 @@ def init_db():
         conn.execute("ALTER TABLE events ADD COLUMN event_type TEXT NOT NULL DEFAULT 'traffic'")
     if "ivs_name" not in existing:
         conn.execute("ALTER TABLE events ADD COLUMN ivs_name TEXT NOT NULL DEFAULT ''")
+    for column in ("source_event_id", "source_sequence", "source_timestamp", "channel"):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
 
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_events_type_timestamp
@@ -95,6 +102,10 @@ def insert_event(
     direction: str = "",
     event_type: str = "traffic",
     ivs_name: str = "",
+    source_event_id: str | None = None,
+    source_sequence: str | None = None,
+    source_timestamp: str | None = None,
+    channel: str | None = None,
 ) -> int | None:
     """Insert a single event with the current UTC timestamp.
 
@@ -115,50 +126,75 @@ def insert_event(
     now = now_utc.strftime("%Y-%m-%d %H:%M:%S")
 
     if event_type == "intrusion":
+        scope_sql = "camera = ? AND ivs_name = ?"
+        scope_params: list[str] = [camera, ivs_name]
+        if channel is None:
+            scope_sql += " AND channel IS NULL"
+            channel_order_sql = ""
+        else:
+            scope_sql += " AND (channel = ? OR channel IS NULL)"
+            scope_params.append(channel)
+            channel_order_sql = "CASE WHEN channel = ? THEN 0 ELSE 1 END, "
+            scope_params.append(channel)
         prev = conn.execute(
-            "SELECT timestamp FROM events "
-            "WHERE event_type = 'intrusion' ORDER BY timestamp DESC LIMIT 1",
+            "SELECT timestamp, source_timestamp, channel FROM events "
+            f"WHERE event_type = 'intrusion' AND {scope_sql} "
+            f"ORDER BY {channel_order_sql}timestamp DESC LIMIT 1",
+            scope_params,
         ).fetchone()
         if prev is not None:
-            prev_ts = datetime.strptime(prev["timestamp"], "%Y-%m-%d %H:%M:%S")
-            now_naive = now_utc.replace(tzinfo=None)
-            elapsed = (now_naive - prev_ts).total_seconds()
+            current_match_ts = datetime.strptime(
+                source_timestamp or now, "%Y-%m-%d %H:%M:%S"
+            )
+            prev_match_ts = datetime.strptime(
+                prev["source_timestamp"] or prev["timestamp"], "%Y-%m-%d %H:%M:%S"
+            )
+            elapsed = (current_match_ts - prev_match_ts).total_seconds()
 
-            if elapsed < 5:
+            if elapsed < 0:
+                logger.debug(
+                    "Allowing out-of-order intrusion event (source time %.0fs earlier)",
+                    -elapsed,
+                )
+            elif elapsed < 5:
                 logger.debug(
                     "Skipping intrusion event — too close to previous (%.0fs)",
                     elapsed,
                 )
                 return None
+            else:
+                from app.intrusions import get_recording_end_utc
 
-            from app.intrusions import get_recording_end_utc
-
-            video_end = get_recording_end_utc(prev_ts)
-            if video_end is not None:
-                if now_naive <= video_end:
+                video_end = get_recording_end_utc(prev_match_ts, channel=prev["channel"])
+                if video_end is not None and current_match_ts <= video_end:
                     logger.debug(
                         "Skipping intrusion event — within previous event's "
                         "video recording (ends %s)",
                         video_end.strftime("%H:%M:%S"),
                     )
                     return None
-                logger.debug(
-                    "Previous video ended at %s, allowing new event",
-                    video_end.strftime("%H:%M:%S"),
-                )
-            elif elapsed < INTRUSION_DEBOUNCE_SECS:
-                logger.debug(
-                    "Skipping intrusion event — no video found yet, within "
-                    "fallback debounce window (%.0fs < %ds)",
-                    elapsed,
-                    INTRUSION_DEBOUNCE_SECS,
-                )
-                return None
+                if video_end is not None:
+                    logger.debug(
+                        "Previous video ended at %s, allowing new event",
+                        video_end.strftime("%H:%M:%S"),
+                    )
+                elif elapsed < INTRUSION_DEBOUNCE_SECS:
+                    logger.debug(
+                        "Skipping intrusion event — no video found yet, within "
+                        "fallback debounce window (%.0fs < %ds)",
+                        elapsed,
+                        INTRUSION_DEBOUNCE_SECS,
+                    )
+                    return None
 
     cursor = conn.execute(
-        "INSERT INTO events (timestamp, camera, direction, event_type, ivs_name) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (now, camera, direction, event_type, ivs_name),
+        "INSERT INTO events (timestamp, camera, direction, event_type, ivs_name, "
+        "source_event_id, source_sequence, source_timestamp, channel) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            now, camera, direction, event_type, ivs_name, source_event_id,
+            source_sequence, source_timestamp, channel,
+        ),
     )
     event_id = cursor.lastrowid
     conn.commit()
@@ -376,15 +412,16 @@ def get_stats(range_key: str, date_str: str | None = None) -> dict:
 
 
 def get_event_by_id(event_id: int) -> dict | None:
-    """Return event row as dict with id, timestamp, event_type, or None if not found."""
+    """Return an event, including source identity used for media matching."""
     conn = _get_conn()
     row = conn.execute(
-        "SELECT id, timestamp, event_type FROM events WHERE id = ?",
+        "SELECT id, timestamp, event_type, camera, ivs_name, source_event_id, "
+        "source_sequence, source_timestamp, channel FROM events WHERE id = ?",
         (event_id,),
     ).fetchone()
     if row is None:
         return None
-    return {"id": row["id"], "timestamp": row["timestamp"], "event_type": row["event_type"]}
+    return dict(row)
 
 
 def get_intrusion_events(date_str: str) -> list[dict]:
@@ -396,7 +433,8 @@ def get_intrusion_events(date_str: str) -> list[dict]:
     conn = _get_conn()
     rows = conn.execute(
         """
-        SELECT id, timestamp
+        SELECT id, timestamp, camera, ivs_name, source_event_id,
+               source_sequence, source_timestamp, channel
         FROM events
         WHERE event_type = 'intrusion'
           AND timestamp >= ? AND timestamp < date(?, '+1 day')
@@ -404,7 +442,7 @@ def get_intrusion_events(date_str: str) -> list[dict]:
         """,
         (date_str, date_str),
     ).fetchall()
-    return [{"id": row["id"], "timestamp": row["timestamp"]} for row in rows]
+    return [dict(row) for row in rows]
 
 
 def get_intrusion_dates() -> list[str]:
