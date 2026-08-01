@@ -9,7 +9,8 @@ cp .env.example .env   # edit with your camera IP and credentials
 docker compose up -d --build
 ```
 
-Dashboard: **http://localhost:3896**
+The dashboard is exposed through Traefik; the container does not publish a
+direct host port.
 
 ## Configuration
 

@@ -34,7 +34,7 @@ from app.database import (
 from app.intrusions import (
     MEDIA_FILE_STABLE_POLL_SECS,
     MEDIA_FILE_STABLE_SECS,
-    MEDIA_PATH,
+    get_media_path,
     get_file_fingerprint,
     match_media_for_events,
     wait_for_stable_file,
@@ -516,8 +516,8 @@ class AnalysisWorker:
         if matched:
             m = matched[0]
             if m.get("video") and m.get("video_date"):
-                candidate = Path(MEDIA_PATH) / m["video_date"] / m["video"]
-                if candidate.is_file():
+                candidate = get_media_path(m["video_date"], m["video"])
+                if candidate is not None:
                     fingerprint = wait_for_stable_file(
                         candidate,
                         timeout=MEDIA_FILE_STABLE_SECS + MEDIA_FILE_STABLE_POLL_SECS,

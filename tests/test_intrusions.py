@@ -105,6 +105,74 @@ class CachedVideoFingerprintTests(unittest.TestCase):
                 )
 
 
+class SafeMediaPathTests(unittest.TestCase):
+    def test_regular_media_file_resolves_under_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "media"
+            date_dir = root / "2026-08-02"
+            date_dir.mkdir(parents=True)
+            media = date_dir / "recording.dav"
+            media.write_bytes(b"video")
+
+            with patch.object(intrusions, "MEDIA_PATH", str(root)):
+                self.assertEqual(
+                    intrusions.get_media_path("2026-08-02", media.name),
+                    media.resolve(),
+                )
+
+    def test_symlinked_media_file_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "media"
+            date_dir = root / "2026-08-02"
+            date_dir.mkdir(parents=True)
+            secret = base / "secret"
+            secret.write_text("SESSION_SECRET=secret", encoding="ascii")
+            (date_dir / "recording.dav").symlink_to(secret)
+
+            with patch.object(intrusions, "MEDIA_PATH", str(root)):
+                self.assertIsNone(
+                    intrusions.get_media_path("2026-08-02", "recording.dav")
+                )
+
+    def test_symlinked_date_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "media"
+            outside = base / "outside"
+            root.mkdir()
+            outside.mkdir()
+            (outside / "recording.dav").write_bytes(b"secret")
+            (root / "2026-08-02").symlink_to(outside, target_is_directory=True)
+
+            with patch.object(intrusions, "MEDIA_PATH", str(root)):
+                self.assertIsNone(intrusions.get_media_path("2026-08-02"))
+                self.assertIsNone(
+                    intrusions.get_media_path("2026-08-02", "recording.dav")
+                )
+
+    def test_path_components_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "media"
+            root.mkdir()
+
+            with patch.object(intrusions, "MEDIA_PATH", str(root)):
+                self.assertIsNone(intrusions.get_media_path("../outside", "file"))
+                self.assertIsNone(
+                    intrusions.get_media_path("2026-08-02", "../secret")
+                )
+
+    def test_fingerprint_rejects_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            link = root / "link"
+            target.write_bytes(b"secret")
+            link.symlink_to(target)
+
+            self.assertIsNone(intrusions.get_file_fingerprint(link))
+
+
 class RecordingSelectionTests(unittest.TestCase):
     DATE = "2026-08-02"
 

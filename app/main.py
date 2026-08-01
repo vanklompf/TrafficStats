@@ -44,6 +44,7 @@ from app.notifications import send_intrusion_notification
 from app.intrusions import (
     MEDIA_PATH,
     get_camera_timezone_name,
+    get_media_path,
     match_media_for_events,
     convert_dav_to_mp4,
     get_cached_video_path,
@@ -506,8 +507,8 @@ def media_snapshot(date_str: str, filename: str):
     """Serve a JPG snapshot from the media directory."""
     date_str = _validate_date(date_str)
     filename = _validate_filename(filename)
-    path = Path(MEDIA_PATH) / date_str / filename
-    if not path.is_file():
+    path = get_media_path(date_str, filename)
+    if path is None:
         raise HTTPException(status_code=404, detail="Snapshot not found")
     return FileResponse(str(path), media_type="image/jpeg")
 
@@ -532,8 +533,8 @@ def media_video_original(date_str: str, filename: str):
     """Serve the raw recording from disk (e.g. camera DAV) for download."""
     date_str = _validate_date(date_str)
     filename = _validate_filename(filename)
-    path = Path(MEDIA_PATH) / date_str / filename
-    if not path.is_file():
+    path = get_media_path(date_str, filename)
+    if path is None:
         raise HTTPException(status_code=404, detail="Video file not found")
     media_type, _ = mimetypes.guess_type(filename)
     if not media_type:

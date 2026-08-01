@@ -4,8 +4,11 @@ services:
     container_name: trafficstats
     restart: unless-stopped
     mem_limit: 4g
-    ports:
-      - "3896:8080"
+    expose:
+      - "8080"
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.trafficstats.loadbalancer.server.port=8080
     volumes:
       - ${DATA_PATH}:/data
       - ${MEDIA_HOST_PATH}:/media:ro

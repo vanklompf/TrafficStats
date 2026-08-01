@@ -16,4 +16,4 @@ docker compose --env-file "$ENV_FILE" build
 echo "Deploying with docker compose..."
 docker compose --env-file "$ENV_FILE" up -d
 
-echo "Done. TrafficStats is running (port 3896)."
+echo "Done. TrafficStats is available through Traefik."

@@ -10,6 +10,7 @@ and caches downscaled snapshot thumbnails for faster grid loading.
 import logging
 import os
 import re
+import stat
 import subprocess
 import threading
 import time
@@ -24,6 +25,34 @@ logger = logging.getLogger(__name__)
 MEDIA_PATH = os.environ.get("INTRUSION_MEDIA_PATH", "/media")
 VIDEO_CACHE_DIR = os.environ.get("VIDEO_CACHE_DIR", "/data/video_cache")
 THUMB_CACHE_DIR = os.environ.get("THUMB_CACHE_DIR", "/data/thumb_cache")
+
+
+def get_media_path(date_str: str, filename: str | None = None) -> Path | None:
+    """Return a contained, non-symlinked media directory or regular file."""
+    if Path(date_str).name != date_str:
+        return None
+    if filename is not None and Path(filename).name != filename:
+        return None
+
+    try:
+        root = Path(MEDIA_PATH).resolve(strict=True)
+        date_path = Path(MEDIA_PATH) / date_str
+        if date_path.is_symlink():
+            return None
+        candidate = date_path if filename is None else date_path / filename
+        if filename is not None and candidate.is_symlink():
+            return None
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+
+    if resolved != root and root not in resolved.parents:
+        return None
+    if filename is None:
+        return resolved if resolved.is_dir() else None
+    return resolved if resolved.is_file() else None
+
+
 def _parse_float_env(name: str, default: float) -> float:
     """Parse a float environment variable, falling back to *default*."""
     raw = os.environ.get(name, "")
@@ -171,12 +200,12 @@ def _get_conversion_lock(key: str) -> threading.Lock:
 def get_file_fingerprint(path: Path) -> tuple[int, int] | None:
     """Return (size, mtime_ns), or None when the source is unavailable."""
     try:
-        stat = path.stat()
+        file_stat = path.lstat()
     except OSError:
         return None
-    if not path.is_file():
+    if not stat.S_ISREG(file_stat.st_mode):
         return None
-    return stat.st_size, stat.st_mtime_ns
+    return file_stat.st_size, file_stat.st_mtime_ns
 
 
 def wait_for_stable_file(
@@ -285,8 +314,7 @@ def _parse_dav_time_range(
 
 def _list_date_dir(date_str: str) -> Path | None:
     """Return the Path for a date directory if it exists."""
-    p = Path(MEDIA_PATH) / date_str
-    return p if p.is_dir() else None
+    return get_media_path(date_str)
 
 
 def _scan_media(
@@ -306,10 +334,13 @@ def _scan_media(
         if date_dir is None:
             continue
         try:
-            files = os.listdir(date_dir)
+            entries = list(os.scandir(date_dir))
         except OSError:
             continue
-        for filename in files:
+        for entry in entries:
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            filename = entry.name
             jpg = _parse_jpg_metadata(filename)
             if jpg is not None:
                 timestamp, media_type, channel, stream, index = jpg
@@ -479,8 +510,8 @@ def is_video_cached(date_str: str, dav_filename: str) -> bool:
     """Check whether a cached MP4 matches the current DAV source."""
     mp4_name = Path(dav_filename).stem + ".mp4"
     cached = Path(VIDEO_CACHE_DIR) / date_str / mp4_name
-    source = Path(MEDIA_PATH) / date_str / dav_filename
-    source_fingerprint = get_file_fingerprint(source)
+    source = get_media_path(date_str, dav_filename)
+    source_fingerprint = get_file_fingerprint(source) if source is not None else None
     return (
         cached.is_file()
         and source_fingerprint is not None
@@ -492,8 +523,8 @@ def get_cached_video_path(date_str: str, dav_filename: str) -> Path | None:
     """Return a cached MP4 only when it matches the current DAV source."""
     mp4_name = Path(dav_filename).stem + ".mp4"
     cached = Path(VIDEO_CACHE_DIR) / date_str / mp4_name
-    source = Path(MEDIA_PATH) / date_str / dav_filename
-    source_fingerprint = get_file_fingerprint(source)
+    source = get_media_path(date_str, dav_filename)
+    source_fingerprint = get_file_fingerprint(source) if source is not None else None
     if (
         cached.is_file()
         and source_fingerprint is not None
@@ -572,9 +603,9 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
 
     Returns the path to the cached MP4, or None on failure.
     """
-    source = Path(MEDIA_PATH) / date_str / dav_filename
-    if not source.is_file():
-        logger.warning("DAV source not found: %s", source)
+    source = get_media_path(date_str, dav_filename)
+    if source is None:
+        logger.warning("DAV source not found or unsafe: %s/%s", date_str, dav_filename)
         return None
 
     lock = _get_conversion_lock(f"{date_str}/{dav_filename}")
@@ -706,8 +737,8 @@ def get_or_create_thumbnail(date_str: str, filename: str) -> Path | None:
     if thumb_path.is_file():
         return thumb_path
 
-    source = Path(MEDIA_PATH) / date_str / filename
-    if not source.is_file():
+    source = get_media_path(date_str, filename)
+    if source is None:
         return None
 
     lock = _get_conversion_lock(f"thumb/{date_str}/{filename}")
