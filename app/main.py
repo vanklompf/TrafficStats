@@ -271,6 +271,8 @@ def api_analysis_queue():
             "event_id": item["event_id"],
             "created_at": item["created_at"],
             "event_timestamp": event["timestamp"],
+            "source": item["source"],
+            "scheduled_for": item["scheduled_for"],
         })
     return JSONResponse(content={
         "pending": pending,
@@ -282,10 +284,8 @@ def api_analysis_queue():
 def api_intrusion_analysis(event_id: int):
     """Return analysis status and text for an intrusion event.
 
-    Reports the stored status verbatim, including 'failed', so the UI can stop
-    polling and offer a retry.  Re-running a failed analysis is an explicit
-    action (see the /retry endpoint) -- doing it here would let an event that
-    can never succeed re-enter the queue on every poll and starve the worker.
+    Reports the stored status verbatim. Retryable and media-pending jobs carry
+    their persisted retry time; terminal failures require an explicit retry.
 
     When no analysis row exists the event is queued once (lazy on-demand trigger).
     """
@@ -296,6 +296,8 @@ def api_intrusion_analysis(event_id: int):
             "status": analysis["status"],
             "analysis": analysis["analysis"],
             "model": analysis["model"],
+            "next_retry_at": analysis["next_retry_at"],
+            "failure_reason": analysis["failure_reason"],
         })
     event = get_event_by_id(event_id)
     if event is None or event.get("event_type") != "intrusion":

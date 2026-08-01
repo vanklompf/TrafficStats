@@ -1284,13 +1284,13 @@
             aiBadge.textContent = 'AI';
             aiBadge.title = 'AI analysis available';
             badges.appendChild(aiBadge);
-          } else if (ev.analysis_status === 'pending' || ev.analysis_status === 'processing') {
+          } else if (['pending', 'processing', 'media_pending', 'retryable_failure'].includes(ev.analysis_status)) {
             const aiBadge = document.createElement('span');
             aiBadge.className = 'badge badge-ai-pending';
             aiBadge.textContent = 'AI';
             aiBadge.title = 'Analysis in progress';
             badges.appendChild(aiBadge);
-          } else if (ev.analysis_status === 'failed') {
+          } else if (ev.analysis_status === 'terminal_failure') {
             const aiBadge = document.createElement('span');
             aiBadge.className = 'badge badge-ai-failed';
             aiBadge.textContent = 'AI';
@@ -1333,9 +1333,11 @@
       if (status === 'done' && ev.analysis) {
         modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-text">' +
           escapeHtml(ev.analysis) + '</div>';
-      } else if (status === 'pending' || status === 'processing') {
-        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-loading">Analyzing…</div>';
-      } else if (status === 'failed') {
+      } else if (['pending', 'processing', 'media_pending', 'retryable_failure'].includes(status)) {
+        const message = status === 'media_pending' ? 'Waiting for video…' :
+          status === 'retryable_failure' ? 'Analysis retry scheduled…' : 'Analyzing…';
+        modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4><div class="modal-analysis-loading">' + message + '</div>';
+      } else if (status === 'terminal_failure') {
         modalAnalysisEl.innerHTML = '<h4>AI Analysis</h4>' +
           '<div class="modal-analysis-failed">Analysis failed</div>' +
           '<button type="button" class="modal-link-btn analysis-retry-btn">Retry analysis</button>';
@@ -1356,7 +1358,7 @@
     function startAnalysisPoll(ev) {
       stopAnalysisPoll();
       if (!ev.id) return;
-      if (ev.analysis_status !== 'pending' && ev.analysis_status !== 'processing') return;
+      if (!['pending', 'processing', 'media_pending', 'retryable_failure'].includes(ev.analysis_status)) return;
       modalAnalysisPollId = setInterval(async () => {
         try {
           const r = await fetch('/api/intrusions/analysis/' + ev.id);
@@ -1366,7 +1368,7 @@
           ev.analysis = data.analysis;
           ev.analysis_model = data.model;
           renderModalAnalysis(ev);
-          if (data.status === 'done' || data.status === 'failed') stopAnalysisPoll();
+          if (data.status === 'done' || data.status === 'terminal_failure') stopAnalysisPoll();
         } catch (_) {}
       }, 3000);
     }
@@ -1382,7 +1384,7 @@
         startAnalysisPoll(ev);
       } catch (err) {
         console.error('Analysis retry failed:', err);
-        ev.analysis_status = 'failed';
+        ev.analysis_status = 'terminal_failure';
         renderModalAnalysis(ev);
       }
     }

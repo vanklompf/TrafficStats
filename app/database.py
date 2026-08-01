@@ -80,6 +80,9 @@ def init_db():
             analysis TEXT,
             model TEXT,
             completed_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TEXT,
+            failure_reason TEXT,
             FOREIGN KEY (event_id) REFERENCES events(id)
         )
     """)
@@ -89,6 +92,15 @@ def init_db():
     ea_cols = {row[1] for row in conn.execute("PRAGMA table_info(event_analysis)").fetchall()}
     if "created_at" in ea_cols:
         conn.execute("ALTER TABLE event_analysis DROP COLUMN created_at")
+    if "attempts" not in ea_cols:
+        conn.execute("ALTER TABLE event_analysis ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+    if "next_retry_at" not in ea_cols:
+        conn.execute("ALTER TABLE event_analysis ADD COLUMN next_retry_at TEXT")
+    if "failure_reason" not in ea_cols:
+        conn.execute("ALTER TABLE event_analysis ADD COLUMN failure_reason TEXT")
+    # Legacy failures have no classification or retry schedule. Treating them as
+    # terminal prevents an upgrade/restart from replaying the whole failed history.
+    conn.execute("UPDATE event_analysis SET status = 'terminal_failure' WHERE status = 'failed'")
 
     conn.commit()
     logger.info("Database initialised at %s", DB_PATH)
@@ -468,7 +480,8 @@ def get_analysis(event_id: int) -> dict | None:
     """Return analysis record for one event, or None if none exists."""
     conn = _get_conn()
     row = conn.execute(
-        "SELECT event_id, status, analysis, model, completed_at "
+        "SELECT event_id, status, analysis, model, completed_at, attempts, "
+        "next_retry_at, failure_reason "
         "FROM event_analysis WHERE event_id = ?",
         (event_id,),
     ).fetchone()
@@ -480,6 +493,9 @@ def get_analysis(event_id: int) -> dict | None:
         "analysis": row["analysis"],
         "model": row["model"],
         "completed_at": row["completed_at"],
+        "attempts": row["attempts"],
+        "next_retry_at": row["next_retry_at"],
+        "failure_reason": row["failure_reason"],
     }
 
 
@@ -490,7 +506,8 @@ def get_analyses_for_events(event_ids: list[int]) -> dict[int, dict]:
     conn = _get_conn()
     placeholders = ",".join("?" * len(event_ids))
     rows = conn.execute(
-        "SELECT event_id, status, analysis, model, completed_at "
+        "SELECT event_id, status, analysis, model, completed_at, attempts, "
+        "next_retry_at, failure_reason "
         "FROM event_analysis WHERE event_id IN (" + placeholders + ")",
         event_ids,
     ).fetchall()
@@ -501,6 +518,9 @@ def get_analyses_for_events(event_ids: list[int]) -> dict[int, dict]:
             "analysis": row["analysis"],
             "model": row["model"],
             "completed_at": row["completed_at"],
+            "attempts": row["attempts"],
+            "next_retry_at": row["next_retry_at"],
+            "failure_reason": row["failure_reason"],
         }
         for row in rows
     }
@@ -512,21 +532,75 @@ def update_analysis(
     analysis: str | None = None,
     model: str | None = None,
 ) -> None:
-    """Store an analysis result (done or failed). Inserts if no row exists, updates otherwise."""
+    """Store a completed analysis outcome. Inserts if no row exists."""
     conn = _get_conn()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute(
-        "UPDATE event_analysis SET status = ?, analysis = ?, model = ?, completed_at = ? "
+        "UPDATE event_analysis SET status = ?, analysis = ?, model = ?, completed_at = ?, "
+        "next_retry_at = NULL, failure_reason = NULL "
         "WHERE event_id = ?",
         (status, analysis, model, now, event_id),
     )
     if cur.rowcount == 0:
         conn.execute(
-            "INSERT INTO event_analysis (event_id, status, analysis, model, completed_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO event_analysis "
+            "(event_id, status, analysis, model, completed_at, attempts) "
+            "VALUES (?, ?, ?, ?, ?, 1)",
             (event_id, status, analysis, model, now),
         )
     conn.commit()
+
+
+def mark_analysis_processing(event_id: int) -> int:
+    """Persist the start of an attempt and return its one-based attempt number."""
+    conn = _get_conn()
+    cur = conn.execute(
+        "UPDATE event_analysis SET status = 'processing', analysis = NULL, model = NULL, "
+        "completed_at = NULL, next_retry_at = NULL, failure_reason = NULL, "
+        "attempts = attempts + 1 WHERE event_id = ?",
+        (event_id,),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT INTO event_analysis "
+            "(event_id, status, attempts) VALUES (?, 'processing', 1)",
+            (event_id,),
+        )
+        attempts = 1
+    else:
+        attempts = conn.execute(
+            "SELECT attempts FROM event_analysis WHERE event_id = ?", (event_id,)
+        ).fetchone()["attempts"]
+    conn.commit()
+    return attempts
+
+
+def schedule_analysis_retry(
+    event_id: int,
+    status: str,
+    failure_reason: str,
+    delay_seconds: float,
+) -> str:
+    """Persist a classified retry and return its UTC due time."""
+    if status not in ("media_pending", "retryable_failure"):
+        raise ValueError(f"Invalid retryable analysis status: {status}")
+    conn = _get_conn()
+    due = datetime.now(timezone.utc) + timedelta(seconds=max(0.0, delay_seconds))
+    due_str = due.strftime("%Y-%m-%d %H:%M:%S")
+    cur = conn.execute(
+        "UPDATE event_analysis SET status = ?, analysis = NULL, model = NULL, "
+        "completed_at = NULL, next_retry_at = ?, failure_reason = ? WHERE event_id = ?",
+        (status, due_str, failure_reason, event_id),
+    )
+    if cur.rowcount == 0:
+        conn.execute(
+            "INSERT INTO event_analysis "
+            "(event_id, status, attempts, next_retry_at, failure_reason) "
+            "VALUES (?, ?, 0, ?, ?)",
+            (event_id, status, due_str, failure_reason),
+        )
+    conn.commit()
+    return due_str
 
 
 def delete_analysis(event_id: int) -> None:
@@ -536,23 +610,26 @@ def delete_analysis(event_id: int) -> None:
     conn.commit()
 
 
-def get_intrusion_event_ids_without_analysis(max_age_days: int | None = None) -> list[int]:
-    """Return intrusion event IDs that have no analysis or have failed analysis (for backfill).
-
-    Includes events with no event_analysis row and events with status='failed', so failed
-    analyses are requeued on startup. If max_age_days is set, only return events with
-    timestamp within that many days (e.g. 3 = last 3 days). Use None for all.
-    """
+def get_intrusion_analysis_backfill(max_age_days: int | None = None) -> list[dict]:
+    """Return new and retryable intrusion jobs, newest first, with retry due times."""
     conn = _get_conn()
     sql = """
-        SELECT e.id FROM events e
+        SELECT e.id, a.status, a.next_retry_at FROM events e
         LEFT JOIN event_analysis a ON e.id = a.event_id
-        WHERE e.event_type = 'intrusion' AND (a.event_id IS NULL OR a.status = 'failed')
+        WHERE e.event_type = 'intrusion'
+          AND (a.event_id IS NULL OR a.status IN (
+              'processing', 'media_pending', 'retryable_failure'
+          ))
     """
     params: tuple = ()
     if max_age_days is not None:
         sql += " AND e.timestamp >= datetime('now', ?)"
         params = (f"-{max_age_days} days",)
-    sql += " ORDER BY e.timestamp"
+    sql += " ORDER BY e.timestamp DESC"
     rows = conn.execute(sql, params).fetchall()
-    return [row["id"] for row in rows]
+    return [dict(row) for row in rows]
+
+
+def get_intrusion_event_ids_without_analysis(max_age_days: int | None = None) -> list[int]:
+    """Compatibility wrapper returning IDs eligible for startup backfill."""
+    return [row["id"] for row in get_intrusion_analysis_backfill(max_age_days)]

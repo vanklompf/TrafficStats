@@ -4,14 +4,14 @@ Background analysis of intrusion event videos using a local Ollama vision model.
 Events are queued in memory after registration; a single worker thread waits
 for the video recording to finish uploading, extracts motion-significant frames,
 sends them to Ollama, and stores the result in the database.
-Queue is repopulated on startup from all unprocessed/failed intrusion events.
+Queue is repopulated on startup from unprocessed and retryable intrusion events.
 """
 
 import base64
+import heapq
 import io
 import logging
 import os
-import queue
 import shutil
 import subprocess
 import tempfile
@@ -26,7 +26,9 @@ from PIL import Image, ImageChops
 
 from app.database import (
     get_event_by_id,
-    get_intrusion_event_ids_without_analysis,
+    get_intrusion_analysis_backfill,
+    mark_analysis_processing,
+    schedule_analysis_retry,
     update_analysis,
 )
 from app.intrusions import (
@@ -57,6 +59,9 @@ ANALYSIS_FRAME_WIDTH = int(os.environ.get("ANALYSIS_FRAME_WIDTH", "512"))
 ANALYSIS_MOTION_THRESHOLD = float(os.environ.get("ANALYSIS_MOTION_THRESHOLD", "0.015"))
 ANALYSIS_MOTION_SAMPLE_RATE = float(os.environ.get("ANALYSIS_MOTION_SAMPLE_RATE", "0.5"))
 ANALYSIS_MOTION_MASK = os.environ.get("ANALYSIS_MOTION_MASK", "")
+ANALYSIS_MEDIA_RETRY_SECS = float(os.environ.get("ANALYSIS_MEDIA_RETRY_SECS", "10"))
+ANALYSIS_RETRY_BASE_SECS = float(os.environ.get("ANALYSIS_RETRY_BASE_SECS", "60"))
+ANALYSIS_RETRY_MAX_SECS = float(os.environ.get("ANALYSIS_RETRY_MAX_SECS", "900"))
 # Optional age cap for startup backfill. Unset or 0 = no limit (all eligible events).
 _backfill_days_raw = os.environ.get("ANALYSIS_BACKFILL_DAYS", "").strip()
 ANALYSIS_BACKFILL_DAYS: int | None = None
@@ -323,17 +328,20 @@ def _convert_dav_to_mp4_temp(dav_path: Path, output_dir: Path) -> Path | None:
 class AnalysisWorker:
     """Single-threaded worker that processes intrusion events for LLM analysis.
 
-    Queue is kept in memory only; on startup it is filled from all intrusion
-    events without analysis or with failed analysis. Set
+    Queue is kept in memory only; on startup it is filled from intrusion events
+    without analysis or with a persisted retryable state. Set
     ``ANALYSIS_BACKFILL_DAYS`` to optionally limit that window.
     """
 
     def __init__(self):
-        self._queue: queue.Queue[int] = queue.Queue()
+        self._ready: list[tuple[int, int, int]] = []
+        self._delayed: list[tuple[float, int, int, int]] = []
+        self._sequence = 0
         self._queue_contents: list[dict] = []
         self._processing: set[int] = set()
         self._queue_lock = threading.Lock()
         self._stop = threading.Event()
+        self._wake = threading.Event()
         self._thread: threading.Thread | None = None
         self._motion_mask_bool: np.ndarray | None = None
 
@@ -352,17 +360,55 @@ class AnalysisWorker:
         so repeated triggers (UI polling, backfill, retry) cannot stack up
         duplicate runs for the same event.
         """
+        self._enqueue(event_id, priority=0, source="live")
+
+    def _enqueue(
+        self,
+        event_id: int,
+        *,
+        priority: int,
+        source: str,
+        delay_seconds: float = 0.0,
+        allow_processing: bool = False,
+    ) -> bool:
         with self._queue_lock:
-            if event_id in self._processing:
-                return
+            if event_id in self._processing and not allow_processing:
+                return False
             if any(item["event_id"] == event_id for item in self._queue_contents):
-                return
+                return False
             now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            self._queue_contents.append({"event_id": event_id, "created_at": now})
-        self._queue.put_nowait(event_id)
+            self._sequence += 1
+            sequence = self._sequence
+            delay_seconds = max(0.0, delay_seconds)
+            item = {
+                "event_id": event_id,
+                "created_at": now,
+                "source": source,
+                "scheduled_for": None,
+            }
+            if delay_seconds > 0:
+                due_monotonic = time.monotonic() + delay_seconds
+                due_utc = datetime.fromtimestamp(
+                    time.time() + delay_seconds, tz=timezone.utc
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                item["scheduled_for"] = due_utc
+                heapq.heappush(
+                    self._delayed, (due_monotonic, priority, sequence, event_id)
+                )
+            else:
+                heapq.heappush(self._ready, (priority, sequence, event_id))
+            self._queue_contents.append(item)
+        self._wake.set()
         event = get_event_by_id(event_id)
         ts = event["timestamp"] if event else "?"
-        logger.info("[AI] Enqueued event %s (%s) for analysis", event_id, ts)
+        logger.info(
+            "[AI] Enqueued event %s (%s) for analysis (%s%s)",
+            event_id,
+            ts,
+            source,
+            f", retry in {delay_seconds:.0f}s" if delay_seconds > 0 else "",
+        )
+        return True
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -376,53 +422,75 @@ class AnalysisWorker:
             self._motion_mask_bool = _load_motion_mask(_DEFAULT_MASK_PATH)
 
         self._stop.clear()
+        self._backfill()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         logger.info("[AI] Analysis worker started (Ollama: %s, model: %s)", OLLAMA_HOST, OLLAMA_MODEL)
-        self._backfill()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread is not None:
             self._thread.join(timeout=5)
         logger.info("[AI] Analysis worker stopped")
 
     def _backfill(self) -> None:
-        """Queue intrusion events that have no analysis or failed analysis."""
+        """Queue new and persisted retryable intrusion jobs."""
         try:
-            ids = get_intrusion_event_ids_without_analysis(
+            jobs = get_intrusion_analysis_backfill(
                 max_age_days=ANALYSIS_BACKFILL_DAYS,
             )
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-            with self._queue_lock:
-                for event_id in ids:
-                    if any(item["event_id"] == event_id for item in self._queue_contents):
-                        continue
-                    self._queue_contents.append({"event_id": event_id, "created_at": now})
-                    self._queue.put_nowait(event_id)
-            if ids:
+            now = datetime.now(timezone.utc)
+            for job in jobs:
+                retry_at = job.get("next_retry_at")
+                delay = 0.0
+                if retry_at:
+                    due = datetime.strptime(retry_at, "%Y-%m-%d %H:%M:%S").replace(
+                        tzinfo=timezone.utc
+                    )
+                    delay = max(0.0, (due - now).total_seconds())
+                is_retry = job.get("status") is not None
+                self._enqueue(
+                    job["id"],
+                    priority=1 if is_retry else 2,
+                    source="retry" if is_retry else "backfill",
+                    delay_seconds=delay,
+                )
+            if jobs:
                 if ANALYSIS_BACKFILL_DAYS is not None:
                     logger.info(
                         "[AI] Backfill: queued %d intrusion event(s) from last %d day(s)",
-                        len(ids), ANALYSIS_BACKFILL_DAYS,
+                        len(jobs), ANALYSIS_BACKFILL_DAYS,
                     )
                 else:
                     logger.info(
                         "[AI] Backfill: queued %d intrusion event(s) (no age limit)",
-                        len(ids),
+                        len(jobs),
                     )
         except Exception as e:
             logger.exception("[AI] Backfill failed: %s", e)
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            try:
-                event_id = self._queue.get(timeout=1)
-            except queue.Empty:
-                continue
+            event_id = None
+            wait_seconds = 1.0
             with self._queue_lock:
-                self._queue_contents[:] = [x for x in self._queue_contents if x["event_id"] != event_id]
-                self._processing.add(event_id)
+                now = time.monotonic()
+                while self._delayed and self._delayed[0][0] <= now:
+                    _, priority, sequence, delayed_id = heapq.heappop(self._delayed)
+                    heapq.heappush(self._ready, (priority, sequence, delayed_id))
+                if self._ready:
+                    _, _, event_id = heapq.heappop(self._ready)
+                    self._queue_contents[:] = [
+                        x for x in self._queue_contents if x["event_id"] != event_id
+                    ]
+                    self._processing.add(event_id)
+                elif self._delayed:
+                    wait_seconds = min(1.0, max(0.0, self._delayed[0][0] - now))
+            if event_id is None:
+                self._wake.wait(wait_seconds)
+                self._wake.clear()
+                continue
             try:
                 self._process_one(event_id)
             finally:
@@ -430,53 +498,47 @@ class AnalysisWorker:
                     self._processing.discard(event_id)
 
     def _process_one(self, event_id: int) -> None:
-        """Process a single event: wait for video, extract frames, call Ollama."""
+        """Process a single event: locate video, extract frames, call Ollama."""
         event = get_event_by_id(event_id)
         if event is None or event.get("event_type") != "intrusion":
             logger.debug("[AI] Event %s not found or not intrusion, skipping", event_id)
             return
 
+        attempt = mark_analysis_processing(event_id)
         timestamp = event["timestamp"]
         date_str = timestamp[:10]
         ev = [event]
 
-        # Wait for the video recording (DAV file) to appear on disk
+        # Check once instead of occupying the only worker while the camera uploads.
         video_path = None
         source_fingerprint = None
-        wait_secs = _video_wait_seconds(timestamp)
-        deadline = time.monotonic() + wait_secs
-        while True:
-            matched = match_media_for_events(ev, date_str)
-            if matched:
-                m = matched[0]
-                if m.get("video") and m.get("video_date"):
-                    candidate = Path(MEDIA_PATH) / m["video_date"] / m["video"]
-                    if candidate.is_file():
-                        stability_timeout = max(
-                            MEDIA_FILE_STABLE_SECS + MEDIA_FILE_STABLE_POLL_SECS,
-                            deadline - time.monotonic(),
-                        )
-                        fingerprint = wait_for_stable_file(
-                            candidate,
-                            timeout=stability_timeout,
-                            stop_event=self._stop,
-                        )
-                        if fingerprint is not None:
-                            video_path = candidate
-                            source_fingerprint = fingerprint
-                            break
-            if self._stop.is_set() or time.monotonic() >= deadline:
-                break
-            time.sleep(2)
+        matched = match_media_for_events(ev, date_str)
+        if matched:
+            m = matched[0]
+            if m.get("video") and m.get("video_date"):
+                candidate = Path(MEDIA_PATH) / m["video_date"] / m["video"]
+                if candidate.is_file():
+                    fingerprint = wait_for_stable_file(
+                        candidate,
+                        timeout=MEDIA_FILE_STABLE_SECS + MEDIA_FILE_STABLE_POLL_SECS,
+                        stop_event=self._stop,
+                    )
+                    if fingerprint is not None:
+                        video_path = candidate
+                        source_fingerprint = fingerprint
 
         if video_path is None:
             if self._stop.is_set():
                 return
-            logger.warning(
-                "[AI] No video found for event %s (%s) within %.0fs",
-                event_id, timestamp, wait_secs,
-            )
-            update_analysis(event_id, "failed", analysis=None, model=None)
+            remaining = _video_wait_seconds(timestamp)
+            if remaining > 0:
+                delay = min(ANALYSIS_MEDIA_RETRY_SECS, remaining)
+                self._schedule_retry(
+                    event_id, "media_pending", "media_not_ready", delay
+                )
+            else:
+                logger.warning("[AI] No video found for event %s (%s)", event_id, timestamp)
+                update_analysis(event_id, "terminal_failure")
             return
 
         logger.info("[AI] Processing event %s (%s) — video: %s", event_id, timestamp, video_path.name)
@@ -490,14 +552,16 @@ class AnalysisWorker:
                 mp4_path = _convert_dav_to_mp4_temp(video_path, work_dir)
                 if mp4_path is None:
                     logger.warning("[AI] DAV conversion failed for event %s (%s)", event_id, timestamp)
-                    update_analysis(event_id, "failed", analysis=None, model=None)
+                    update_analysis(event_id, "terminal_failure")
                     return
                 if get_file_fingerprint(video_path) != source_fingerprint:
                     logger.warning(
                         "[AI] DAV source changed during conversion for event %s (%s)",
                         event_id, timestamp,
                     )
-                    update_analysis(event_id, "failed", analysis=None, model=None)
+                    self._schedule_retry(
+                        event_id, "media_pending", "media_changed", ANALYSIS_MEDIA_RETRY_SECS
+                    )
                     return
             else:
                 mp4_path = video_path
@@ -515,7 +579,7 @@ class AnalysisWorker:
 
             if not frames:
                 logger.warning("[AI] No frames extracted for event %s (%s)", event_id, timestamp)
-                update_analysis(event_id, "failed", analysis=None, model=None)
+                update_analysis(event_id, "terminal_failure")
                 return
 
             images_b64, total_bytes = _load_and_encode_frames(frames)
@@ -527,7 +591,7 @@ class AnalysisWorker:
 
             if not images_b64:
                 logger.warning("[AI] All frames failed to encode for event %s (%s)", event_id, timestamp)
-                update_analysis(event_id, "failed", analysis=None, model=None)
+                update_analysis(event_id, "terminal_failure")
                 return
 
             if (
@@ -538,7 +602,9 @@ class AnalysisWorker:
                     "[AI] DAV source changed during frame extraction for event %s (%s)",
                     event_id, timestamp,
                 )
-                update_analysis(event_id, "failed", analysis=None, model=None)
+                self._schedule_retry(
+                    event_id, "media_pending", "media_changed", ANALYSIS_MEDIA_RETRY_SECS
+                )
                 return
 
             # Call Ollama
@@ -566,11 +632,14 @@ class AnalysisWorker:
                     "[AI] Ollama API error for event %s (%s): %s %s",
                     event_id, timestamp, e.response.status_code, e.response.text[:200],
                 )
-                update_analysis(event_id, "failed", analysis=None, model=None)
+                if e.response.status_code in (408, 429) or e.response.status_code >= 500:
+                    self._schedule_provider_retry(event_id, attempt, f"http_{e.response.status_code}")
+                else:
+                    update_analysis(event_id, "terminal_failure")
                 return
             except Exception as e:
                 logger.exception("[AI] Ollama request failed for event %s (%s): %s", event_id, timestamp, e)
-                update_analysis(event_id, "failed", analysis=None, model=None)
+                self._schedule_provider_retry(event_id, attempt, type(e).__name__)
                 return
             elapsed = time.monotonic() - t0
 
@@ -588,7 +657,9 @@ class AnalysisWorker:
                     "[AI] DAV source changed during analysis for event %s (%s)",
                     event_id, timestamp,
                 )
-                update_analysis(event_id, "failed", analysis=None, model=None)
+                self._schedule_retry(
+                    event_id, "media_pending", "media_changed", ANALYSIS_MEDIA_RETRY_SECS
+                )
                 return
             update_analysis(event_id, "done", analysis=analysis_text, model=model_used)
             logger.info(
@@ -598,7 +669,26 @@ class AnalysisWorker:
 
         except Exception as e:
             logger.exception("[AI] Unexpected error analysing event %s (%s): %s", event_id, timestamp, e)
-            update_analysis(event_id, "failed", analysis=None, model=None)
+            self._schedule_provider_retry(event_id, attempt, type(e).__name__)
         finally:
             if work_dir is not None:
                 shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _schedule_provider_retry(self, event_id: int, attempt: int, reason: str) -> None:
+        delay = min(
+            ANALYSIS_RETRY_MAX_SECS,
+            ANALYSIS_RETRY_BASE_SECS * (2 ** max(0, attempt - 1)),
+        )
+        self._schedule_retry(event_id, "retryable_failure", reason, delay)
+
+    def _schedule_retry(
+        self, event_id: int, status: str, reason: str, delay_seconds: float
+    ) -> None:
+        schedule_analysis_retry(event_id, status, reason, delay_seconds)
+        self._enqueue(
+            event_id,
+            priority=1,
+            source="retry",
+            delay_seconds=delay_seconds,
+            allow_processing=True,
+        )
