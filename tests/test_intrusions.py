@@ -105,5 +105,76 @@ class CachedVideoFingerprintTests(unittest.TestCase):
                 )
 
 
+class RecordingSelectionTests(unittest.TestCase):
+    DATE = "2026-08-02"
+
+    def _match(self, filenames, event_time):
+        with tempfile.TemporaryDirectory() as tmp:
+            media_root = Path(tmp)
+            date_dir = media_root / self.DATE
+            date_dir.mkdir()
+            for filename in filenames:
+                (date_dir / filename).touch()
+
+            event = {"id": 1, "timestamp": f"{self.DATE} {event_time}"}
+            with patch.object(intrusions, "MEDIA_PATH", str(media_root)), patch.object(
+                intrusions, "_local_tz", intrusions.ZoneInfo("UTC")
+            ):
+                matched = intrusions.match_media_for_events([event], self.DATE)[0]
+                event_utc = intrusions.datetime.strptime(
+                    event["timestamp"], "%Y-%m-%d %H:%M:%S"
+                )
+                recording_end = intrusions.get_recording_end_utc(event_utc)
+            return matched, recording_end
+
+    def test_exact_containment_beats_earlier_tolerance_match(self):
+        earlier = "09.59.00-10.00.00[M].dav"
+        containing = "10.00.00-10.01.00[M].dav"
+
+        matched, recording_end = self._match(
+            [earlier, containing], "10:00:20"
+        )
+
+        self.assertEqual(matched["video"], containing)
+        self.assertEqual(recording_end.strftime("%H:%M:%S"), "10:01:00")
+
+    def test_closest_start_wins_when_recordings_overlap(self):
+        earlier = "09.59.00-10.01.00[M].dav"
+        later = "10.00.10-10.01.10[M].dav"
+
+        matched, _ = self._match([earlier, later], "10:00:20")
+
+        self.assertEqual(matched["video"], later)
+
+    def test_nearest_boundary_wins_for_tolerance_only_matches(self):
+        earlier = "09.59.00-10.00.00[M].dav"
+        later = "10.00.30-10.01.00[M].dav"
+
+        matched, _ = self._match([earlier, later], "10:00:20")
+
+        self.assertEqual(matched["video"], later)
+
+    def test_filesystem_order_does_not_change_selection(self):
+        earlier = "09.59.00-10.00.00[M].dav"
+        containing = "10.00.00-10.01.00[M].dav"
+
+        first, _ = self._match([earlier, containing], "10:00:20")
+        second, _ = self._match([containing, earlier], "10:00:20")
+
+        self.assertEqual(first["video"], containing)
+        self.assertEqual(second["video"], containing)
+
+    def test_media_scan_uses_camera_local_event_date(self):
+        event = {"id": 1, "timestamp": "2026-08-02 23:55:00"}
+        local_date = intrusions.datetime(2026, 8, 3).date()
+
+        with patch.object(
+            intrusions, "_local_tz", intrusions.ZoneInfo("Asia/Tokyo")
+        ), patch.object(intrusions, "_scan_media", return_value=([], [])) as scan:
+            intrusions.match_media_for_events([event], "2026-08-02")
+
+        scan.assert_called_once_with(local_date)
+
+
 if __name__ == "__main__":
     unittest.main()

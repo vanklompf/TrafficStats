@@ -13,7 +13,7 @@ import re
 import subprocess
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -252,23 +252,15 @@ def _list_date_dir(date_str: str) -> Path | None:
     return p if p.is_dir() else None
 
 
-def get_recording_end_utc(event_utc: datetime) -> datetime | None:
-    """Return the UTC end time of the video recording that covers *event_utc*.
-
-    Scans DAV files in the media directory around the event date (accounting
-    for camera timezone offset) and returns the end timestamp of the first
-    recording whose range contains *event_utc* (with ``MATCH_THRESHOLD_SECS``
-    tolerance).  Returns ``None`` when no matching file is found — typically
-    because the camera is still recording or no recording was triggered.
-
-    *event_utc* must be a **naive** datetime representing UTC.
-    """
-    tz = _get_local_tz()
-    event_aware = event_utc.replace(tzinfo=timezone.utc)
-    event_local = event_aware.astimezone(tz)
-    base_date = event_local.date()
-
-    tolerance = timedelta(seconds=MATCH_THRESHOLD_SECS)
+def _scan_media(
+    base_date: date,
+) -> tuple[
+    list[tuple[str, datetime, str]],
+    list[tuple[str, datetime, datetime, str]],
+]:
+    """Return timestamped JPG and DAV candidates around a camera-local date."""
+    jpgs: list[tuple[str, datetime, str]] = []
+    davs: list[tuple[str, datetime, datetime, str]] = []
 
     for delta in (-1, 0, 1):
         d = base_date + timedelta(days=delta)
@@ -280,15 +272,76 @@ def get_recording_end_utc(event_utc: datetime) -> datetime | None:
             files = os.listdir(date_dir)
         except OSError:
             continue
-        for f in files:
-            rng = _parse_dav_time_range(f, ds)
-            if rng is None:
+        for filename in files:
+            timestamp = _parse_jpg_timestamp(filename)
+            if timestamp is not None:
+                jpgs.append((filename, _camera_to_utc(timestamp), ds))
                 continue
-            start_utc = _camera_to_utc(rng[0])
-            end_utc = _camera_to_utc(rng[1])
-            if (start_utc - tolerance) <= event_utc <= (end_utc + tolerance):
-                return end_utc
-    return None
+            time_range = _parse_dav_time_range(filename, ds)
+            if time_range is not None:
+                davs.append((
+                    filename,
+                    _camera_to_utc(time_range[0]),
+                    _camera_to_utc(time_range[1]),
+                    ds,
+                ))
+
+    jpgs.sort(key=lambda item: (item[1], item[2], item[0]))
+    davs.sort(key=lambda item: (item[1], item[2], item[3], item[0]))
+    return jpgs, davs
+
+
+def _select_recording(
+    event_utc: datetime,
+    recordings: list[tuple[str, datetime, datetime, str]],
+) -> tuple[str, datetime, datetime, str] | None:
+    """Select the best recording deterministically, preferring containment."""
+    tolerance = timedelta(seconds=MATCH_THRESHOLD_SECS)
+    ranked = []
+
+    for recording in recordings:
+        filename, start, end, date_str = recording
+        if event_utc < start - tolerance or event_utc > end + tolerance:
+            continue
+
+        contained = start <= event_utc <= end
+        boundary_distance = 0.0 if contained else min(
+            abs((event_utc - start).total_seconds()),
+            abs((event_utc - end).total_seconds()),
+        )
+        ranked.append((
+            0 if contained else 1,
+            boundary_distance,
+            abs((event_utc - start).total_seconds()),
+            (end - start).total_seconds(),
+            start,
+            filename,
+            date_str,
+            recording,
+        ))
+
+    if not ranked:
+        return None
+    return min(ranked, key=lambda item: item[:-1])[-1]
+
+
+def get_recording_end_utc(event_utc: datetime) -> datetime | None:
+    """Return the UTC end time of the video recording that covers *event_utc*.
+
+    Scans DAV files around the camera-local event date and uses the same
+    deterministic ranking as event media enrichment. Returns ``None`` when no
+    matching file is found, typically because recording is still in progress.
+
+    *event_utc* must be a **naive** datetime representing UTC.
+    """
+    tz = _get_local_tz()
+    event_aware = event_utc.replace(tzinfo=timezone.utc)
+    event_local = event_aware.astimezone(tz)
+    base_date = event_local.date()
+
+    _, recordings = _scan_media(base_date)
+    selected = _select_recording(event_utc, recordings)
+    return selected[2] if selected is not None else None
 
 
 def match_media_for_events(
@@ -308,34 +361,13 @@ def match_media_for_events(
         snapshot_date / video_date – date directory the file lives in
     """
     base_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+    if events:
+        first_event_utc = datetime.strptime(
+            events[0]["timestamp"], "%Y-%m-%d %H:%M:%S"
+        ).replace(tzinfo=timezone.utc)
+        base_date = first_event_utc.astimezone(_get_local_tz()).date()
 
-    # Scan event-date and neighbouring directories (timezone offset can
-    # push camera files into the previous or next calendar day).
-    jpgs: list[tuple[str, datetime, str]] = []        # (fname, utc_ts, date_dir)
-    davs: list[tuple[str, datetime, datetime, str]] = []  # (fname, utc_start, utc_end, date_dir)
-
-    for delta in (-1, 0, 1):
-        d = base_date + timedelta(days=delta)
-        ds = d.strftime("%Y-%m-%d")
-        date_dir = _list_date_dir(ds)
-        if date_dir is None:
-            continue
-        try:
-            files = os.listdir(date_dir)
-        except OSError:
-            continue
-        for f in files:
-            ts = _parse_jpg_timestamp(f)
-            if ts is not None:
-                jpgs.append((f, _camera_to_utc(ts), ds))
-                continue
-            rng = _parse_dav_time_range(f, ds)
-            if rng is not None:
-                davs.append((f, _camera_to_utc(rng[0]), _camera_to_utc(rng[1]), ds))
-
-
-    jpgs.sort(key=lambda x: x[1])
-    davs.sort(key=lambda x: x[1])
+    jpgs, davs = _scan_media(base_date)
 
     results = []
     for ev in events:
@@ -352,16 +384,9 @@ def match_media_for_events(
                 best_jpg = fname
                 best_jpg_date = ds
 
-        # Find DAV whose range contains the event (with a small tolerance
-        # to account for minor clock drift between event and file timestamps).
-        best_dav = None
-        best_dav_date = None
-        tolerance = timedelta(seconds=MATCH_THRESHOLD_SECS)
-        for fname, start, end, ds in davs:
-            if (start - tolerance) <= ev_ts <= (end + tolerance):
-                best_dav = fname
-                best_dav_date = ds
-                break
+        recording = _select_recording(ev_ts, davs)
+        best_dav = recording[0] if recording is not None else None
+        best_dav_date = recording[3] if recording is not None else None
 
         results.append({
             **ev,
