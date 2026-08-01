@@ -11,8 +11,9 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from authlib.integrations.starlette_client import OAuth, OAuthError
 from fastapi import Request
@@ -48,7 +49,13 @@ def app_url() -> str:
 def session_secret() -> str:
     secret = os.environ.get("SESSION_SECRET", "").strip()
     if secret:
+        if oidc_enabled() and len(secret.encode("utf-8")) < 32:
+            raise RuntimeError(
+                "SESSION_SECRET must contain at least 32 bytes when OIDC is enabled"
+            )
         return secret
+    if oidc_enabled():
+        raise RuntimeError("SESSION_SECRET is required when OIDC is enabled")
     # Ephemeral fallback so local runs without SESSION_SECRET still work;
     # sessions will not survive restarts.
     generated = secrets.token_urlsafe(32)
@@ -77,6 +84,24 @@ def build_oauth() -> OAuth | None:
             "or OIDC_ISSUER_URL is missing"
         )
 
+    public_url = app_url()
+    parsed_public_url = urlsplit(public_url)
+    if (
+        parsed_public_url.scheme != "https"
+        or not parsed_public_url.netloc
+        or parsed_public_url.username is not None
+        or parsed_public_url.password is not None
+        or parsed_public_url.query
+        or parsed_public_url.fragment
+    ):
+        raise RuntimeError(
+            "APP_URL must be a canonical HTTPS URL when OIDC is enabled"
+        )
+
+    scopes = os.environ.get("OIDC_SCOPES", "openid email profile").split()
+    if "openid" not in scopes:
+        scopes.insert(0, "openid")
+
     oauth = OAuth()
     oauth.register(
         name="oidc",
@@ -84,7 +109,7 @@ def build_oauth() -> OAuth | None:
         client_secret=client_secret,
         server_metadata_url=f"{issuer}.well-known/openid-configuration",
         client_kwargs={
-            "scope": os.environ.get("OIDC_SCOPES", "openid email profile"),
+            "scope": " ".join(scopes),
         },
     )
     return oauth
@@ -92,7 +117,10 @@ def build_oauth() -> OAuth | None:
 
 def current_user(request: Request) -> dict[str, Any] | None:
     user = request.session.get(SESSION_USER_KEY)
-    return user if isinstance(user, dict) else None
+    if not isinstance(user, dict):
+        return None
+    subject = user.get("sub")
+    return user if isinstance(subject, str) and subject.strip() else None
 
 
 def _redirect_uri(request: Request) -> str:
@@ -126,12 +154,32 @@ async def callback(request: Request, oauth: OAuth) -> Response:
             content={"detail": f"OIDC login failed: {exc.error}"},
         )
 
+    if not isinstance(token.get("id_token"), str) or not token["id_token"]:
+        logger.error("OIDC callback returned no ID token")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "OIDC login failed: ID token is required"},
+        )
+
+    # Authlib validates the ID token and exposes its claims as userinfo during
+    # authorize_access_token(). Do not fall back to unvalidated OAuth UserInfo.
     userinfo = token.get("userinfo")
-    if userinfo is None:
-        userinfo = await oauth.oidc.userinfo(token=token)
+    if not isinstance(userinfo, Mapping):
+        logger.error("OIDC callback returned no validated ID token claims")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "OIDC login failed: validated claims are required"},
+        )
+    subject = userinfo.get("sub")
+    if not isinstance(subject, str) or not subject.strip():
+        logger.error("OIDC callback returned no valid subject claim")
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "OIDC login failed: subject claim is required"},
+        )
 
     request.session[SESSION_USER_KEY] = {
-        "sub": userinfo.get("sub"),
+        "sub": subject,
         "email": userinfo.get("email"),
         "name": userinfo.get("name") or userinfo.get("preferred_username"),
         "preferred_username": userinfo.get("preferred_username"),

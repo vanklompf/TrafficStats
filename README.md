@@ -32,8 +32,8 @@ Edit `.env`:
 | `OIDC_CLIENT_ID` | OAuth client ID | — |
 | `OIDC_CLIENT_SECRET` | OAuth client secret | — |
 | `OIDC_ISSUER_URL` | Provider issuer URL (with trailing slash) | — |
-| `APP_URL` | Public base URL of this app (redirect URI + Secure cookies) | — |
-| `SESSION_SECRET` | Cookie signing key (required when OIDC is on in production) | ephemeral |
+| `APP_URL` | Canonical HTTPS public URL (required when OIDC is enabled) | — |
+| `SESSION_SECRET` | Cookie signing key of at least 32 random bytes (required when OIDC is enabled) | — |
 | `OIDC_AUTO_LOGIN` | Redirect browsers straight to the IdP when unauthenticated | `true` |
 
 When **CITY** is set, traffic events are only recorded between sunrise and sunset at that location. The chart shows shaded bands for periods when no collection is done (night). Intrusion events are always recorded regardless of time.
@@ -45,6 +45,9 @@ Set `OIDC_ENABLED=true` and point `OIDC_ISSUER_URL` / client credentials at your
 ```
 {APP_URL}/auth/oidc/callback
 ```
+
+`APP_URL` must use HTTPS. Generate a persistent session secret with
+`python -c 'import secrets; print(secrets.token_urlsafe(32))'`.
 
 `/api/health` stays public for container health checks. When OIDC is off, the app behaves as before (no login).
 

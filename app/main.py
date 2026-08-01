@@ -128,14 +128,14 @@ async def require_oidc_session(request: Request, call_next):
 
 # SessionMiddleware is added last so it is outermost and populates
 # request.session before the auth gate runs. SameSite=lax works with the
-# Authentik redirect; cookies are Secure when APP_URL is https.
+# Authentik redirect; OIDC sessions always use Secure cookies.
 _app_url = auth_mod.app_url()
 app.add_middleware(
     SessionMiddleware,
     secret_key=auth_mod.session_secret(),
     session_cookie="trafficstats_session",
     same_site="lax",
-    https_only=_app_url.startswith("https://"),
+    https_only=auth_mod.oidc_enabled() or _app_url.startswith("https://"),
     max_age=60 * 60 * 24 * 7,
 )
 
