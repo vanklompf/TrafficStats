@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -48,6 +49,12 @@ VIDEO_SCALE_HEIGHT = int(os.environ.get("VIDEO_SCALE_HEIGHT", "720"))
 # needs ~520 s.  With QSV hardware encoding this drops to ~2-5× real-time,
 # but we keep the generous default for the software fallback path.
 VIDEO_FFMPEG_TIMEOUT = int(os.environ.get("VIDEO_FFMPEG_TIMEOUT", "600"))
+
+# Camera FTP uploads use their final filename while data is still being
+# written. Require an unchanged source fingerprint before opening a DAV.
+MEDIA_FILE_STABLE_SECS = 10.0
+MEDIA_FILE_STABLE_POLL_SECS = 2.0
+MEDIA_FILE_STABLE_TIMEOUT = 30.0
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +161,56 @@ def _get_conversion_lock(key: str) -> threading.Lock:
         if key not in _conversion_locks:
             _conversion_locks[key] = threading.Lock()
         return _conversion_locks[key]
+
+
+def get_file_fingerprint(path: Path) -> tuple[int, int] | None:
+    """Return (size, mtime_ns), or None when the source is unavailable."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    return stat.st_size, stat.st_mtime_ns
+
+
+def wait_for_stable_file(
+    path: Path,
+    *,
+    timeout: float = MEDIA_FILE_STABLE_TIMEOUT,
+    stable_seconds: float = MEDIA_FILE_STABLE_SECS,
+    poll_seconds: float = MEDIA_FILE_STABLE_POLL_SECS,
+    stop_event: threading.Event | None = None,
+) -> tuple[int, int] | None:
+    """Wait until a non-empty file's size and mtime remain unchanged."""
+    timeout = max(0.0, timeout)
+    stable_seconds = max(0.0, stable_seconds)
+    poll_seconds = max(0.01, poll_seconds)
+    deadline = time.monotonic() + timeout
+    previous: tuple[int, int] | None = None
+    stable_since: float | None = None
+
+    while True:
+        now = time.monotonic()
+        current = get_file_fingerprint(path)
+        if current is not None and current[0] > 0:
+            if current != previous:
+                stable_since = now
+            elif stable_since is not None and now - stable_since >= stable_seconds:
+                return current
+        else:
+            stable_since = None
+        previous = current
+
+        remaining = deadline - now
+        if remaining <= 0:
+            return None
+        wait_seconds = min(poll_seconds, remaining)
+        if stop_event is not None:
+            if stop_event.wait(wait_seconds):
+                return None
+        else:
+            time.sleep(wait_seconds)
 
 
 def _parse_jpg_timestamp(filename: str) -> datetime | None:
@@ -329,19 +386,57 @@ def _ensure_cache_dir(date_str: str) -> Path:
 
 
 def is_video_cached(date_str: str, dav_filename: str) -> bool:
-    """Check whether a cached MP4 exists (without updating mtime)."""
+    """Check whether a cached MP4 matches the current DAV source."""
     mp4_name = Path(dav_filename).stem + ".mp4"
-    return (Path(VIDEO_CACHE_DIR) / date_str / mp4_name).is_file()
+    cached = Path(VIDEO_CACHE_DIR) / date_str / mp4_name
+    source = Path(MEDIA_PATH) / date_str / dav_filename
+    source_fingerprint = get_file_fingerprint(source)
+    return (
+        cached.is_file()
+        and source_fingerprint is not None
+        and _cached_fingerprint(cached) == source_fingerprint
+    )
 
 
 def get_cached_video_path(date_str: str, dav_filename: str) -> Path | None:
-    """Return the cached MP4 path if it exists, else None."""
+    """Return a cached MP4 only when it matches the current DAV source."""
     mp4_name = Path(dav_filename).stem + ".mp4"
     cached = Path(VIDEO_CACHE_DIR) / date_str / mp4_name
-    if cached.is_file():
+    source = Path(MEDIA_PATH) / date_str / dav_filename
+    source_fingerprint = get_file_fingerprint(source)
+    if (
+        cached.is_file()
+        and source_fingerprint is not None
+        and _cached_fingerprint(cached) == source_fingerprint
+    ):
         cached.touch()  # update mtime for LRU
         return cached
     return None
+
+
+def _fingerprint_path(cached: Path) -> Path:
+    return cached.with_name(cached.name + ".source")
+
+
+def _cached_fingerprint(cached: Path) -> tuple[int, int] | None:
+    try:
+        size, mtime_ns = _fingerprint_path(cached).read_text(encoding="ascii").split()
+        return int(size), int(mtime_ns)
+    except (OSError, ValueError):
+        return None
+
+
+def _write_cached_fingerprint(cached: Path, fingerprint: tuple[int, int]) -> bool:
+    metadata = _fingerprint_path(cached)
+    temporary = metadata.with_name(metadata.name + ".tmp")
+    try:
+        temporary.write_text(f"{fingerprint[0]} {fingerprint[1]}\n", encoding="ascii")
+        temporary.replace(metadata)
+        return True
+    except OSError:
+        logger.exception("Failed to write cache source fingerprint: %s", metadata)
+        temporary.unlink(missing_ok=True)
+        return False
 
 
 def _build_ffmpeg_cmd(
@@ -398,6 +493,11 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
         if cached is not None:
             return cached
 
+        source_fingerprint = wait_for_stable_file(source)
+        if source_fingerprint is None:
+            logger.warning("DAV source is still growing or unavailable: %s", source)
+            return None
+
         cache_dir = _ensure_cache_dir(date_str)
         mp4_name = Path(dav_filename).stem + ".mp4"
         output = cache_dir / mp4_name
@@ -452,7 +552,15 @@ def convert_dav_to_mp4(date_str: str, dav_filename: str) -> Path | None:
             tmp_output.unlink(missing_ok=True)
             return None
 
+        if get_file_fingerprint(source) != source_fingerprint:
+            logger.warning("DAV source changed during conversion, discarding output: %s", source)
+            tmp_output.unlink(missing_ok=True)
+            return None
+
         tmp_output.rename(output)
+        if not _write_cached_fingerprint(output, source_fingerprint):
+            output.unlink(missing_ok=True)
+            return None
         size_kb = output.stat().st_size / 1024
         logger.info("Conversion complete: %s (%.1f KB)", output, size_kb)
 
@@ -475,6 +583,7 @@ def _enforce_cache_limit():
             size = oldest.stat().st_size
             try:
                 oldest.unlink()
+                _fingerprint_path(oldest).unlink(missing_ok=True)
                 total -= size
                 logger.info("Cache evict: %s (%.1f MB freed)", oldest, size / 1024 / 1024)
             except OSError:

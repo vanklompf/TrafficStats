@@ -29,7 +29,14 @@ from app.database import (
     get_intrusion_event_ids_without_analysis,
     update_analysis,
 )
-from app.intrusions import MEDIA_PATH, match_media_for_events
+from app.intrusions import (
+    MEDIA_FILE_STABLE_POLL_SECS,
+    MEDIA_FILE_STABLE_SECS,
+    MEDIA_PATH,
+    get_file_fingerprint,
+    match_media_for_events,
+    wait_for_stable_file,
+)
 logger = logging.getLogger(__name__)
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama:11434")
@@ -435,6 +442,7 @@ class AnalysisWorker:
 
         # Wait for the video recording (DAV file) to appear on disk
         video_path = None
+        source_fingerprint = None
         wait_secs = _video_wait_seconds(timestamp)
         deadline = time.monotonic() + wait_secs
         while True:
@@ -444,13 +452,26 @@ class AnalysisWorker:
                 if m.get("video") and m.get("video_date"):
                     candidate = Path(MEDIA_PATH) / m["video_date"] / m["video"]
                     if candidate.is_file():
-                        video_path = candidate
-                        break
+                        stability_timeout = max(
+                            MEDIA_FILE_STABLE_SECS + MEDIA_FILE_STABLE_POLL_SECS,
+                            deadline - time.monotonic(),
+                        )
+                        fingerprint = wait_for_stable_file(
+                            candidate,
+                            timeout=stability_timeout,
+                            stop_event=self._stop,
+                        )
+                        if fingerprint is not None:
+                            video_path = candidate
+                            source_fingerprint = fingerprint
+                            break
             if self._stop.is_set() or time.monotonic() >= deadline:
                 break
             time.sleep(2)
 
         if video_path is None:
+            if self._stop.is_set():
+                return
             logger.warning(
                 "[AI] No video found for event %s (%s) within %.0fs",
                 event_id, timestamp, wait_secs,
@@ -469,6 +490,13 @@ class AnalysisWorker:
                 mp4_path = _convert_dav_to_mp4_temp(video_path, work_dir)
                 if mp4_path is None:
                     logger.warning("[AI] DAV conversion failed for event %s (%s)", event_id, timestamp)
+                    update_analysis(event_id, "failed", analysis=None, model=None)
+                    return
+                if get_file_fingerprint(video_path) != source_fingerprint:
+                    logger.warning(
+                        "[AI] DAV source changed during conversion for event %s (%s)",
+                        event_id, timestamp,
+                    )
                     update_analysis(event_id, "failed", analysis=None, model=None)
                     return
             else:
@@ -499,6 +527,17 @@ class AnalysisWorker:
 
             if not images_b64:
                 logger.warning("[AI] All frames failed to encode for event %s (%s)", event_id, timestamp)
+                update_analysis(event_id, "failed", analysis=None, model=None)
+                return
+
+            if (
+                source_fingerprint is not None
+                and get_file_fingerprint(video_path) != source_fingerprint
+            ):
+                logger.warning(
+                    "[AI] DAV source changed during frame extraction for event %s (%s)",
+                    event_id, timestamp,
+                )
                 update_analysis(event_id, "failed", analysis=None, model=None)
                 return
 
@@ -541,6 +580,16 @@ class AnalysisWorker:
             eval_count = data.get("eval_count") or "?"
 
             analysis_text = content.strip() or None
+            if (
+                source_fingerprint is not None
+                and get_file_fingerprint(video_path) != source_fingerprint
+            ):
+                logger.warning(
+                    "[AI] DAV source changed during analysis for event %s (%s)",
+                    event_id, timestamp,
+                )
+                update_analysis(event_id, "failed", analysis=None, model=None)
+                return
             update_analysis(event_id, "done", analysis=analysis_text, model=model_used)
             logger.info(
                 "[AI] Analysis done for event %s (%s) — model: %s, %.1fs, %s frames, %s tokens",
