@@ -43,8 +43,8 @@ def _first_value(data: dict, *keys: str):
     return None
 
 
-def _source_timestamp(value, *, assume_utc: bool) -> str | None:
-    """Normalize a Dahua UTC/epoch timestamp for SQLite and media matching."""
+def _source_timestamp(value) -> str | None:
+    """Normalize a Dahua timestamp for SQLite and media matching."""
     if value is None or value == "":
         return None
     try:
@@ -57,12 +57,11 @@ def _source_timestamp(value, *, assume_utc: bool) -> str | None:
             text = str(value).strip().replace("Z", "+00:00")
             parsed = datetime.fromisoformat(text)
             if parsed.tzinfo is None:
-                source_tz = timezone.utc
-                if not assume_utc:
-                    try:
-                        source_tz = ZoneInfo(os.environ.get("TZ", "UTC"))
-                    except Exception:
-                        logger.warning("Invalid TZ while parsing camera EventTime; using UTC")
+                try:
+                    source_tz = ZoneInfo(os.environ.get("TZ", "UTC"))
+                except Exception:
+                    logger.warning("Invalid TZ while parsing camera timestamp; using UTC")
+                    source_tz = timezone.utc
                 parsed = parsed.replace(tzinfo=source_tz)
             parsed = parsed.astimezone(timezone.utc)
         return parsed.strftime("%Y-%m-%d %H:%M:%S")
@@ -233,8 +232,7 @@ class DahuaListener:
             source_event_id = source_sequence
         utc_value = _first_value(data, "UTC")
         source_time = _source_timestamp(
-            utc_value if utc_value is not None else _first_value(data, "EventTime"),
-            assume_utc=utc_value is not None,
+            utc_value if utc_value is not None else _first_value(data, "EventTime")
         )
         channel = _first_value(data, "Channel")
         source_index = alarm.get("index")
