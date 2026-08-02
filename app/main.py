@@ -1,5 +1,5 @@
 """
-TrafficStats -- FastAPI application.
+Jeż Security -- FastAPI application.
 
 Serves the dashboard and provides an API for traffic event statistics
 and intrusion event browsing with snapshot/video media.
@@ -107,7 +107,7 @@ async def lifespan(app: FastAPI):
     close_conn()
 
 
-app = FastAPI(title="TrafficStats", lifespan=lifespan)
+app = FastAPI(title="Jeż Security", lifespan=lifespan)
 
 _oauth = auth_mod.build_oauth()
 

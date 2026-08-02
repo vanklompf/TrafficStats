@@ -4,7 +4,7 @@ Review scope: intrusion event ingestion, event-to-media matching, snapshot and
 video handling, the image pipeline leading to LLM analysis, background job
 architecture, duplication, and test coverage.
 
-Runtime inspection: 2026-08-02, against the running `trafficstats:local`
+Runtime inspection: 2026-08-02, against the running `jez-security:local`
 container and its persisted SQLite database. The inspection was read-only and
 did not trigger analysis retries or media conversions.
 

@@ -3,8 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>TrafficStats</title>
+  <title>Jeż Security</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/home-icon.png">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <meta name="theme-color" content="#0b315e">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
@@ -48,6 +51,31 @@
       font-size: 1.5rem;
       font-weight: 600;
       letter-spacing: -0.02em;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: .8rem;
+    }
+    .brand-logo {
+      width: 48px;
+      height: 48px;
+      object-fit: cover;
+      object-position: 50% 42%;
+      border: 2px solid #367db8;
+      border-radius: 14px;
+      box-shadow: 0 0 18px rgba(22, 119, 210, .2);
+    }
+    .brand-name { display: block; }
+    .brand-tagline {
+      display: block;
+      margin-top: .12rem;
+      color: var(--text-dim);
+      font-size: .7rem;
+      font-weight: 500;
+      letter-spacing: .09em;
+      text-transform: uppercase;
     }
 
     .auth-bar {
@@ -669,7 +697,13 @@
 <body>
   <div class="container">
     <header>
-      <h1>Traffic Stats</h1>
+      <div class="brand">
+        <img class="brand-logo" src="/static/jez-security-logo.webp" alt="Jeż Security hedgehog logo">
+        <h1>
+          <span class="brand-name">Jeż Security</span>
+          <span class="brand-tagline">Traffic &amp; perimeter watch</span>
+        </h1>
+      </div>
       <div class="auth-bar" id="auth-bar">
         <span id="auth-user"></span>
         <a href="/auth/logout">Sign out</a>
@@ -777,7 +811,7 @@
   </div>
 
   <footer>
-    <span>TrafficStats <span id="app-version"></span></span>
+    <span>Jeż Security <span id="app-version"></span></span>
     <span class="sep">·</span>
     <a href="https://github.com/vanklompf/TrafficStats" target="_blank" rel="noopener">GitHub</a>
   </footer>

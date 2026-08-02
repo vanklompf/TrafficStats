@@ -5,7 +5,7 @@ Test harness for comparing video analysis approaches with Ollama vision models.
 Extracts frames from DAV/MP4 videos using multiple strategies, sends them to
 Ollama, and produces a structured comparison of quality, speed, and efficiency.
 
-Uses existing camera recordings from the TrafficStats media directory as
+Uses existing camera recordings from the Jeż Security media directory as
 test samples.
 
 Requirements: httpx, Pillow, numpy, ffmpeg on PATH.

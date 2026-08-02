@@ -1,6 +1,6 @@
-# TrafficStats
+# Jeż Security
 
-Web application that counts vehicles using a Dahua camera's built-in IVS (tripwire/line-crossing detection). Events are stored in SQLite and displayed as a line chart with 5-minute resolution.
+Security dashboard that counts vehicles and monitors intrusions using a Dahua camera's built-in IVS detection. Events are stored in SQLite and displayed with traffic charts and an intrusion gallery.
 
 ## Quick start
 

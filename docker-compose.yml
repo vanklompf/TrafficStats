@@ -1,14 +1,17 @@
+name: jez-security
+
 services:
-  trafficstats:
+  jez-security:
     build: .
-    container_name: trafficstats
+    image: jez-security:local
+    container_name: jez-security
     restart: unless-stopped
     mem_limit: 4g
     expose:
       - "8080"
     labels:
       - traefik.enable=true
-      - traefik.http.services.trafficstats.loadbalancer.server.port=8080
+      - traefik.http.services.jez-security.loadbalancer.server.port=8080
     volumes:
       - ${DATA_PATH}:/data
       - ${MEDIA_HOST_PATH}:/media:ro

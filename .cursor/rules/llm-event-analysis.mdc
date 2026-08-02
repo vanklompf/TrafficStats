@@ -145,7 +145,7 @@ The timing prefix is built by `_prompt_with_timing(n_frames, span_secs)`. For a 
 
 ## Docker networking
 
-The `trafficstats` container joins the external `ollama` Docker network (hardcoded in `docker-compose.yml`). This allows it to reach the Ollama container at hostname `ollama` on port `11434`.
+The `jez-security` container joins the external `ollama` Docker network (hardcoded in `docker-compose.yml`). This allows it to reach the Ollama container at hostname `ollama` on port `11434`.
 
 ## Key design decisions
 

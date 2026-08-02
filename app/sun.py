@@ -34,7 +34,7 @@ def _get_location() -> LocationInfo | None:
         return None
 
     try:
-        geolocator = Nominatim(user_agent="TrafficStats")
+        geolocator = Nominatim(user_agent="jez-security")
         result = geolocator.geocode(city)
         if result is None:
             logger.warning("CITY not found: %s", city)

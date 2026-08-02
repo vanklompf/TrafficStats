@@ -1,16 +1,16 @@
 ---
-description: Debugging guidelines for the TrafficStats Docker application.
+description: Debugging guidelines for the Jeż Security Docker application.
 alwaysApply: true
 ---
 
-# Debugging TrafficStats
+# Debugging Jeż Security
 
-When asked to debug, diagnose, or investigate issues with TrafficStats:
+When asked to debug, diagnose, or investigate issues with Jeż Security:
 
 ## 1. Check container logs
 
 ```bash
-docker logs trafficstats --tail 200
+docker logs jez-security --tail 200
 ```
 
 Use `--since 5m` or `--since 1h` for time-scoped output. The app uses Python `logging` at the level set by `LOG_LEVEL` (default `INFO`).
@@ -18,13 +18,13 @@ Use `--since 5m` or `--since 1h` for time-scoped output. The app uses Python `lo
 ## 2. Check container status
 
 ```bash
-docker ps -a --filter name=trafficstats
+docker ps -a --filter name=jez-security
 ```
 
 ## 3. Shell into the container
 
 ```bash
-docker exec -it trafficstats bash
+docker exec -it jez-security bash
 ```
 
 The app runs as `appuser` (UID/GID from `PUID`/`PGID`). Data is at `/data` (SQLite DB), media at `/media` (read-only camera FTP uploads).
@@ -34,8 +34,8 @@ The app runs as `appuser` (UID/GID from `PUID`/`PGID`). Data is at `/data` (SQLi
 The DB path defaults to `/data/traffic.db` (override with `DB_PATH`).
 
 ```bash
-docker exec trafficstats sqlite3 /data/traffic.db ".tables"
-docker exec trafficstats sqlite3 /data/traffic.db "SELECT * FROM events ORDER BY id DESC LIMIT 10;"
+docker exec jez-security sqlite3 /data/traffic.db ".tables"
+docker exec jez-security sqlite3 /data/traffic.db "SELECT * FROM events ORDER BY id DESC LIMIT 10;"
 ```
 
 ## 5. Common issues
