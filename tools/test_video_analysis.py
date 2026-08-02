@@ -221,6 +221,7 @@ def extract_frames_motion(
     width: int | None = None,
     cleanup_candidates: bool = False,
     timing_out: dict | None = None,
+    max_frames: int = 0,
 ) -> list[Path]:
     """Extract frames where pixel-level change exceeds *threshold* (0-1).
 
@@ -259,12 +260,11 @@ def extract_frames_motion(
             shutil.rmtree(candidates_dir)
         return []
 
-    kept: list[Path] = []
+    accepted: list[tuple[Path, float, float]] = []
     ref_img: Image.Image | None = None
-    frame_idx = 0
 
     t_motion0 = time.monotonic()
-    for cp in candidate_paths:
+    for cand_i, cp in enumerate(candidate_paths):
         try:
             img = Image.open(cp)
             img.load()
@@ -273,20 +273,53 @@ def extract_frames_motion(
             continue
 
         if ref_img is None:
-            dst = out_dir / f"frame_{frame_idx:04d}.jpg"
-            cp.rename(dst)
-            kept.append(dst)
+            accepted.append((cp, cand_i * sample_rate, 0.0))
             ref_img = img
-            frame_idx += 1
             continue
 
         diff = _compute_frame_diff(ref_img, img, mask_bool=mask_bool)
         if diff >= threshold:
-            dst = out_dir / f"frame_{frame_idx:04d}.jpg"
-            cp.rename(dst)
-            kept.append(dst)
+            accepted.append((cp, cand_i * sample_rate, diff))
             ref_img = img
-            frame_idx += 1
+
+    if max_frames > 0 and len(accepted) > max_frames:
+        if max_frames == 1:
+            accepted = accepted[:1]
+        elif max_frames == 2:
+            accepted = [accepted[0], accepted[-1]]
+        else:
+            selected = {0, len(accepted) - 1}
+            slots = max_frames - 2
+            start = accepted[0][1]
+            span = accepted[-1][1] - start
+            buckets: list[list[int]] = [[] for _ in range(slots)]
+            for i in range(1, len(accepted) - 1):
+                position = ((accepted[i][1] - start) / span
+                            if span > 0 else i / (len(accepted) - 1))
+                bucket = min(int(position * slots), slots - 1)
+                buckets[bucket].append(i)
+            for bucket in buckets:
+                if bucket:
+                    selected.add(max(bucket, key=lambda i: (accepted[i][2], -i)))
+            while len(selected) < max_frames:
+                remaining = [i for i in range(1, len(accepted) - 1) if i not in selected]
+                if not remaining:
+                    break
+                selected.add(max(
+                    remaining,
+                    key=lambda i: (
+                        min(abs(accepted[i][1] - accepted[j][1]) for j in selected),
+                        accepted[i][2],
+                        -i,
+                    ),
+                ))
+            accepted = [accepted[i] for i in sorted(selected)]
+
+    kept: list[Path] = []
+    for frame_idx, (cp, _, _) in enumerate(accepted):
+        dst = out_dir / f"frame_{frame_idx:04d}.jpg"
+        cp.rename(dst)
+        kept.append(dst)
 
     t_motion1 = time.monotonic()
 
@@ -294,7 +327,7 @@ def extract_frames_motion(
     width_label = f" @{width}px" if width else ""
     _info(
         f"  Motion filter: {len(candidate_paths)} candidates -> "
-        f"{len(kept)} kept (threshold={threshold}, sample_rate={sample_rate}s{width_label}{mask_label})"
+        f"{len(kept)} selected (threshold={threshold}, sample_rate={sample_rate}s{width_label}{mask_label})"
     )
 
     t_clean0 = time.monotonic()
@@ -656,6 +689,7 @@ def run_single_test(
     num_ctx: int | None = None,
     hwaccel: str | None = None,
     motion_mask_bool: np.ndarray | None = None,
+    max_frames: int = 0,
     extract_only: bool = False,
     extracted_frames_root: Path | None = None,
 ) -> dict:
@@ -688,6 +722,7 @@ def run_single_test(
             hwaccel=hwaccel, mask_bool=motion_mask_bool, width=width,
             cleanup_candidates=extract_only,
             timing_out=motion_timing,
+            max_frames=max_frames,
         )
     elif method == "keyframe":
         frames = extract_frames_keyframe(video_path, frame_dir, hwaccel=hwaccel, width=width)
@@ -834,6 +869,8 @@ examples:
                     help="Comma-separated pixel-diff thresholds (0-1) for 'motion' method (default: 0.01,0.02,0.05).")
     p.add_argument("--motion-sample-rate", type=float, default=0.5,
                     help="Candidate frame sampling interval in seconds for 'motion' method (default: 0.5).")
+    p.add_argument("--max-frames", type=int, default=12,
+                    help="Maximum motion frames retained with temporal coverage (default: 12; 0 disables).")
     p.add_argument("--frame-counts", type=str, default="3,5,10",
                     help="Comma-separated frame counts for 'uniform' method (default: 3,5,10).")
     p.add_argument("--widths", type=str, default="512,768,1024",
@@ -878,6 +915,8 @@ def main() -> None:
     args.motion_thresholds = parse_csv_float(args.motion_thresholds)
     args.frame_counts = parse_csv_int(args.frame_counts)
     args.widths = parse_csv_int(args.widths)
+    if args.max_frames < 0:
+        parser.error("--max-frames must be 0 or greater")
 
     valid_methods = {"interval", "motion", "keyframe", "uniform"}
     for m in args.methods:
@@ -949,6 +988,7 @@ def main() -> None:
     _info(f"Models:     {', '.join(args.models)}")
     _info(f"Methods:    {', '.join(args.methods)}")
     _info(f"Widths:     {', '.join(str(w) for w in args.widths)}")
+    _info(f"Max frames: {args.max_frames or 'unlimited'}")
     if motion_mask_bool is not None:
         _info(f"Mask:       {args.motion_mask} ({motion_mask_bool.shape[1]}x{motion_mask_bool.shape[0]})")
     _info(f"Configs:    {len(matrix)} per video")
@@ -1023,6 +1063,7 @@ def main() -> None:
                     num_ctx=args.num_ctx,
                     hwaccel=hwaccel,
                     motion_mask_bool=motion_mask_bool,
+                    max_frames=args.max_frames,
                     extract_only=args.extract_only,
                     extracted_frames_root=run_root if args.extract_only else None,
                 )
@@ -1044,6 +1085,7 @@ def main() -> None:
             "intervals": args.intervals,
             "motion_thresholds": args.motion_thresholds,
             "motion_sample_rate": args.motion_sample_rate,
+            "max_frames": args.max_frames,
             "frame_counts": args.frame_counts,
             "prompt": args.prompt,
             "ollama_host": args.ollama_host,

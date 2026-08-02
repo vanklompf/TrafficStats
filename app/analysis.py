@@ -56,6 +56,7 @@ OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
 
 ANALYSIS_VIDEO_WAIT = int(os.environ.get("ANALYSIS_VIDEO_WAIT", "300"))
 ANALYSIS_FRAME_WIDTH = int(os.environ.get("ANALYSIS_FRAME_WIDTH", "512"))
+ANALYSIS_MAX_FRAMES = max(0, int(os.environ.get("ANALYSIS_MAX_FRAMES", "12")))
 ANALYSIS_MOTION_THRESHOLD = float(os.environ.get("ANALYSIS_MOTION_THRESHOLD", "0.015"))
 ANALYSIS_MOTION_SAMPLE_RATE = float(os.environ.get("ANALYSIS_MOTION_SAMPLE_RATE", "0.5"))
 ANALYSIS_MOTION_MASK = os.environ.get("ANALYSIS_MOTION_MASK", "")
@@ -149,6 +150,55 @@ def _compute_frame_diff(
     return mean_diff / 255.0
 
 
+def _select_motion_frames(
+    frames: list[tuple[Path, float, float]],
+    max_frames: int,
+) -> list[tuple[Path, float, float]]:
+    """Cap motion frames while preserving activity strength and time coverage.
+
+    Each tuple contains ``(path, offset_seconds, motion_score)``. The first and
+    last frames anchor the sequence. Interior time segments contribute their
+    strongest motion frame; empty segments are filled by the frames furthest
+    in time from those already selected.
+    """
+    if max_frames <= 0 or len(frames) <= max_frames:
+        return frames
+    if max_frames == 1:
+        return frames[:1]
+
+    selected = {0, len(frames) - 1}
+    interior_slots = max_frames - 2
+    if interior_slots <= 0:
+        return [frames[i] for i in sorted(selected)]
+
+    start = frames[0][1]
+    span = frames[-1][1] - start
+    buckets: list[list[int]] = [[] for _ in range(interior_slots)]
+    for i in range(1, len(frames) - 1):
+        position = (frames[i][1] - start) / span if span > 0 else i / (len(frames) - 1)
+        bucket = min(int(position * interior_slots), interior_slots - 1)
+        buckets[bucket].append(i)
+
+    for bucket in buckets:
+        if bucket:
+            selected.add(max(bucket, key=lambda i: (frames[i][2], -i)))
+
+    while len(selected) < max_frames:
+        remaining = [i for i in range(1, len(frames) - 1) if i not in selected]
+        if not remaining:
+            break
+        selected.add(max(
+            remaining,
+            key=lambda i: (
+                min(abs(frames[i][1] - frames[j][1]) for j in selected),
+                frames[i][2],
+                -i,
+            ),
+        ))
+
+    return [frames[i] for i in sorted(selected)]
+
+
 def _extract_frames_motion(
     video_path: Path,
     out_dir: Path,
@@ -157,6 +207,7 @@ def _extract_frames_motion(
     *,
     width: int | None = None,
     mask_bool: np.ndarray | None = None,
+    max_frames: int = 0,
 ) -> tuple[list[Path], float]:
     """Extract frames where pixel-level change exceeds *threshold*.
 
@@ -189,10 +240,8 @@ def _extract_frames_motion(
         shutil.rmtree(candidates_dir, ignore_errors=True)
         return [], 0.0
 
-    kept: list[Path] = []
-    kept_offsets: list[float] = []
+    accepted: list[tuple[Path, float, float]] = []
     ref_img: Image.Image | None = None
-    frame_idx = 0
 
     for cand_i, cp in enumerate(candidate_paths):
         try:
@@ -204,31 +253,30 @@ def _extract_frames_motion(
 
         offset = cand_i * sample_rate
         if ref_img is None:
-            dst = out_dir / f"frame_{frame_idx:04d}.jpg"
-            cp.rename(dst)
-            kept.append(dst)
-            kept_offsets.append(offset)
+            accepted.append((cp, offset, 0.0))
             ref_img = img
-            frame_idx += 1
             continue
 
         diff = _compute_frame_diff(ref_img, img, mask_bool=mask_bool)
         if diff >= threshold:
-            dst = out_dir / f"frame_{frame_idx:04d}.jpg"
-            cp.rename(dst)
-            kept.append(dst)
-            kept_offsets.append(offset)
+            accepted.append((cp, offset, diff))
             ref_img = img
-            frame_idx += 1
 
-    span = (kept_offsets[-1] - kept_offsets[0]) if len(kept_offsets) > 1 else 0.0
+    selected = _select_motion_frames(accepted, max_frames)
+    kept: list[Path] = []
+    for frame_idx, (cp, _, _) in enumerate(selected):
+        dst = out_dir / f"frame_{frame_idx:04d}.jpg"
+        cp.rename(dst)
+        kept.append(dst)
+
+    span = (selected[-1][1] - selected[0][1]) if len(selected) > 1 else 0.0
 
     mask_label = " +mask" if mask_bool is not None else ""
     width_label = f" @{width}px" if width else ""
     logger.debug(
-        "[AI] Motion filter: %d candidates -> %d kept spanning %.1fs "
+        "[AI] Motion filter: %d candidates -> %d accepted -> %d selected spanning %.1fs "
         "(threshold=%.3f, sample_rate=%.2fs%s%s)",
-        len(candidate_paths), len(kept), span, threshold, sample_rate,
+        len(candidate_paths), len(accepted), len(kept), span, threshold, sample_rate,
         width_label, mask_label,
     )
     shutil.rmtree(candidates_dir, ignore_errors=True)
@@ -575,6 +623,7 @@ class AnalysisWorker:
                 sample_rate=ANALYSIS_MOTION_SAMPLE_RATE,
                 width=ANALYSIS_FRAME_WIDTH,
                 mask_bool=self._motion_mask_bool,
+                max_frames=ANALYSIS_MAX_FRAMES,
             )
 
             if not frames:
