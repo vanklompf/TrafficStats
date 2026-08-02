@@ -11,6 +11,10 @@ services:
       - "8080"
     labels:
       - traefik.enable=true
+      - traefik.http.routers.trafficstats.rule=Host(`trafficstats.korta.top`)
+      - traefik.http.routers.trafficstats.tls.certresolver=letsencrypt
+      - traefik.http.routers.trafficstats.tls.domains[0].main=korta.top
+      - traefik.http.routers.trafficstats.tls.domains[0].sans=*.korta.top
       - traefik.http.services.jez-security.loadbalancer.server.port=8080
     volumes:
       - ${DATA_PATH}:/data
